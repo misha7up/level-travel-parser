@@ -199,8 +199,9 @@ export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[
     const go = await ltGet("/search/get_offer", { request_id: rid, tour_id: o.id });
     const pkg = go.package || {};
     if (!pkg.id) continue;
-    const nights = pkg.dates_info?.nights_count ?? o.nights_count ?? null;
-    if (nights != null && Number(nights) !== 12) continue;
+    // строго ночи в отеле (dates_info.nights_count), не «тур на 12»
+    const nights = Number(pkg.dates_info?.nights_count ?? o.nights_count ?? 0);
+    if (nights !== 12) continue;
     packages.push({
       departDate: dayIso,
       tourId: o.id,
@@ -208,7 +209,7 @@ export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[
       price: Math.round(Number(pkg.price || o.price || 0)),
       room: pkg.room_type || o.room_type || "",
       meal: pkg.pansion_description || "",
-      nights: nights == null ? null : Number(nights),
+      nights: 12,
       checkIn: pkg.dates_info?.check_in || "",
       checkOut: pkg.dates_info?.check_out || "",
       packageId: pkg.id,

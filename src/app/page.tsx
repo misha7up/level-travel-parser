@@ -218,12 +218,12 @@ export default function Home() {
           continue;
         }
         pushLog(`  flights=${data.totalFlights} direct12=${data.direct12n}`);
-        collected.push(...(data.offers || []));
+        collected.push(...(data.offers || []).filter((o: FlightOffer) => Number(o.hotelNights) === 12));
         setOffers(dedupeRank(collected).slice(0, topN));
       }
       setOffers(dedupeRank(collected).slice(0, topN));
       setPhase("done");
-      pushLog("Готово.");
+      pushLog("Готово (в топе только прямые + 12 ночей в отеле).");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       pushLog(`Сбой: ${msg}`);
@@ -451,12 +451,14 @@ export default function Home() {
 function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
   const seen = new Set<string>();
   const unique: FlightOffer[] = [];
-  const sorted = [...rows].sort(
-    (a, b) =>
-      a.price - b.price ||
-      (b.preferenceScore || 0) - (a.preferenceScore || 0) ||
-      a.outboundDep.localeCompare(b.outboundDep),
-  );
+  const sorted = [...rows]
+    .filter((r) => Number(r.hotelNights) === 12)
+    .sort(
+      (a, b) =>
+        a.price - b.price ||
+        (b.preferenceScore || 0) - (a.preferenceScore || 0) ||
+        a.outboundDep.localeCompare(b.outboundDep),
+    );
   const perPkg = new Map<number, number>();
   for (const r of sorted) {
     const key = [r.price, r.outboundDep, r.returnDep, r.outboundFlight, r.returnFlight, r.packageId].join(

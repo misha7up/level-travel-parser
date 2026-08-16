@@ -7,20 +7,22 @@ Next.js app: даты → пакеты Level → прямые рейсы (12 н�
 ```bash
 cd rixos-web
 npm install
-npx playwright install chromium   # для /api/enrich
 npm run dev
 ```
 
+Локально для `/api/enrich` нужен установленный Chrome/Edge (`puppeteer-core` channel).
+
 Открой http://localhost:3000 → выставь даты → **Обновить**.
+
+Фильтр: только **12 ночей в отеле** (`datesInfo.nights_count === 12`) + прямые рейсы. «Тур на 12» с 11 ночами в отеле отбрасывается.
 
 ## Vercel
 
-1. Import project, Root Directory: `rixos-web` (если репозиторий — родительская папка).
-2. Framework: Next.js.
-3. Нужен план с `maxDuration` ≥ 60 с (Pro) — поиск дня и Chromium для рейсов долгие.
-4. Chromium: `@sparticuz/chromium` уже в зависимостях для `/api/enrich`.
+1. Framework: Next.js.
+2. Нужен план с `maxDuration` ≥ 60 с (Pro) — поиск дня и Chromium для рейсов долгие.
+3. Рейсы: `puppeteer-core` + `@sparticuz/chromium` (не Playwright — на Vercel у него нет browsers.json).
 
-Hobby (10s) для enrich обычно не хватает — тогда пакеты соберутся, рейсы могут падать по таймауту.
+Hobby (10s) для enrich обычно не хватает — пакеты соберутся, рейсы упадут по таймауту.
 
 ## API
 

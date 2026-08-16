@@ -1,4 +1,7 @@
-export const EXTRACT_FLIGHTS_JS = `() => {
+import type { Browser, Page } from "puppeteer-core";
+
+/** Runs in page context: only direct flights with hotel nights_count === 12. */
+export const EXTRACT_FLIGHTS_JS = `(() => {
   function findStore() {
     const root = document.getElementById('checkout_page') || document.body;
     let store = null;
@@ -28,6 +31,7 @@ export const EXTRACT_FLIGHTS_JS = `() => {
   const loading = st.flights && st.flights.loadingState;
   const all = [...(st.flights.economFlights || []), ...(st.flights.businessFlights || [])];
   const pkg = st.package || {};
+  const pkgNights = Number((pkg.dates_info && pkg.dates_info.nights_count) || pkg.nights_count || 0);
   function back0(f) {
     const b = f.back;
     return Array.isArray(b) ? b[0] : b;
@@ -42,6 +46,7 @@ export const EXTRACT_FLIGHTS_JS = `() => {
   for (const f of all) {
     const di = f.datesInfo || {};
     if (!isDirect(f)) continue;
+    // строго: ночи именно в отеле
     if (Number(di.nights_count) !== 12) continue;
     const to = f.to;
     const b = back0(f);
@@ -78,13 +83,14 @@ export const EXTRACT_FLIGHTS_JS = `() => {
     loading,
     totalFlights: all.length,
     direct12n: rows.length,
+    packageHotelNights: pkgNights || null,
     packagePrice: pkg.price || pkg.net_price || null,
     room: pkg.room_type || null,
     meal: pkg.pansion_description || pkg.pansion || null,
     operator: (pkg.operator && pkg.operator.name) || null,
     best: rows.slice(0, 12),
   };
-}`;
+})()`;
 
 export type FlightOffer = {
   price: number;
@@ -131,71 +137,97 @@ function whyText(row: FlightOffer) {
   return parts.join("; ");
 }
 
-async function launchBrowser() {
-  const isVercel = !!process.env.VERCEL;
-  if (isVercel) {
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function launchBrowser(): Promise<Browser> {
+  const puppeteer = await import("puppeteer-core");
+  const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+  if (isServerless) {
     const chromium = await import("@sparticuz/chromium");
-    const puppeteer = await import("playwright-core");
-    const executablePath = await chromium.default.executablePath();
-    return puppeteer.chromium.launch({
+    return puppeteer.default.launch({
       args: chromium.default.args,
-      executablePath,
+      defaultViewport: { width: 1440, height: 900 },
+      executablePath: await chromium.default.executablePath(),
       headless: true,
     });
   }
-  try {
-    const pw = await import("playwright");
-    return pw.chromium.launch({ headless: true });
-  } catch {
-    const core = await import("playwright-core");
-    return core.chromium.launch({ headless: true, channel: "chrome" });
-  }
+
+  // Local: system Chrome
+  return puppeteer.default.launch({
+    channel: "chrome",
+    headless: true,
+    defaultViewport: { width: 1440, height: 900 },
+  });
 }
 
-export async function enrichPackage(packageId: number, meta?: { operator?: string; room?: string; meal?: string }) {
+async function waitFlights(page: Page) {
+  await sleep(2000);
+  const deadline = Date.now() + 90000;
+  let last: any = { ok: false };
+  while (Date.now() < deadline) {
+    last = await page.evaluate(EXTRACT_FLIGHTS_JS);
+    if (last?.ok && (last.loading === "fetchFinished" || (last.totalFlights || 0) > 0)) {
+      return last;
+    }
+    await sleep(1500);
+  }
+  return last;
+}
+
+export async function enrichPackage(
+  packageId: number,
+  meta?: { operator?: string; room?: string; meal?: string },
+) {
   const url = `https://level.travel/packages/${packageId}`;
   const browser = await launchBrowser();
   try {
-    const page = await browser.newPage({
-      userAgent: "Mozilla/5.0",
-      locale: "ru-RU",
-      viewport: { width: 1440, height: 900 },
-    });
+    const page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0");
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(2000);
-    const deadline = Date.now() + 90000;
-    let last: any = { ok: false };
-    while (Date.now() < deadline) {
-      last = await page.evaluate(EXTRACT_FLIGHTS_JS);
-      if (last?.ok && (last.loading === "fetchFinished" || (last.totalFlights || 0) > 0)) {
-        break;
-      }
-      await page.waitForTimeout(1500);
-    }
+    const last = await waitFlights(page);
     await page.close();
+
     if (!last?.ok) {
       return { ok: false as const, error: last?.error || "no_flights", url, packageId };
     }
-    const offers: FlightOffer[] = (last.best || []).map((row: any) => {
-      const fo: FlightOffer = {
-        ...row,
-        source: "level.travel",
-        operator: last.operator || meta?.operator || "",
-        room: last.room || meta?.room || "",
-        meal: last.meal || meta?.meal || "",
+
+    // ещё раз на сервере: только 12 ночей в отеле
+    const offers: FlightOffer[] = (last.best || [])
+      .filter((row: any) => Number(row.hotelNights) === 12)
+      .map((row: any) => {
+        const fo: FlightOffer = {
+          ...row,
+          hotelNights: 12,
+          source: "level.travel",
+          operator: last.operator || meta?.operator || "",
+          room: last.room || meta?.room || "",
+          meal: last.meal || meta?.meal || "",
+          url,
+          packageId,
+          why: "",
+        };
+        fo.why = whyText(fo);
+        return fo;
+      });
+
+    if (!offers.length) {
+      return {
+        ok: false as const,
+        error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0}, pkgNights=${last.packageHotelNights})`,
         url,
         packageId,
-        why: "",
       };
-      fo.why = whyText(fo);
-      return fo;
-    });
+    }
+
     return {
       ok: true as const,
       url,
       packageId,
       totalFlights: last.totalFlights,
-      direct12n: last.direct12n,
+      direct12n: offers.length,
       offers,
     };
   } finally {
