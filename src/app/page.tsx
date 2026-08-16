@@ -145,7 +145,6 @@ export default function Home() {
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
   const [offers, setOffers] = useState<FlightOffer[]>([]);
-  const [enrichErrors, setEnrichErrors] = useState<string[]>([]);
   const [phase, setPhase] = useState<"idle" | "packages" | "flights" | "done">("idle");
   const [statusMsg, setStatusMsg] = useState("");
   const [etaSec, setEtaSec] = useState<number | null>(null);
@@ -358,7 +357,6 @@ export default function Home() {
     setPhase("packages");
     setPackages([]);
     setOffers([]);
-    setEnrichErrors([]);
     setLog([]);
     setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
@@ -411,7 +409,6 @@ export default function Home() {
       setStatusMsg(`Рейсы · туда до 09:00, обратно после 17:00…`);
 
       const collected: FlightOffer[] = [];
-      const errors: string[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
         const p = toEnrich[i];
         setProgress({ dayIdx: days, days, flightIdx: i, flights: toEnrich.length });
@@ -428,9 +425,7 @@ export default function Home() {
         try {
           const { ok, data } = await enrichOnce(p);
           if (!ok) {
-            const err = String(data.error || "no flights");
-            pushLog(`  skip: ${err}`);
-            if (errors.length < 5) errors.push(`${p.packageId}: ${err}`);
+            pushLog(`  skip: ${String(data.error || "no flights")}`);
             continue;
           }
           const filtered = (data.offers || []).filter(
@@ -443,26 +438,19 @@ export default function Home() {
           pushLog(
             `  flights=${data.totalFlights} match=${filtered.length} cashback=${withCb}/${filtered.length}`,
           );
-          if (!filtered.length && errors.length < 5) {
-            errors.push(`${p.packageId}: нет прямых 12н + слот <09:00/≥17:00`);
-          }
           collected.push(...filtered);
           setOffers(dedupeRank(collected).slice(0, topN));
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           pushLog(`  skip: ${msg}`);
-          if (errors.length < 5) errors.push(`${p.packageId}: ${msg}`);
         }
       }
       setOffers(dedupeRank(collected).slice(0, topN));
-      setEnrichErrors(errors);
       setPhase("done");
       setStatusMsg("");
       setEtaSec(null);
       if (!collected.length) {
-        pushLog(
-          "Подходящих рейсов нет — проверь Chromium на сервере (`journalctl -u rixos-web`) или слоты времени.",
-        );
+        pushLog("Подходящих рейсов нет.");
       } else {
         pushLog("Готово.");
       }
