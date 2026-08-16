@@ -86,6 +86,17 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     });
   }
   rows.sort((a, b) => a.price - b.price || b.preferenceScore - a.preferenceScore);
+  function cashbackFromPage() {
+    const tip =
+      (window.customCashback && window.customCashback.cashbackTooltip) ||
+      (window.cashback && window.cashback.cashback && window.cashback.cashback.tooltip) ||
+      '';
+    const m = String(tip).match(/(\\d+(?:[.,]\\d+)?)\\s*%/);
+    if (!m) return null;
+    const n = Number(String(m[1]).replace(',', '.'));
+    if (!isFinite(n) || n <= 0 || n > 100) return null;
+    return { rate: n / 100, tooltip: tip };
+  }
   return {
     ok: true,
     loading,
@@ -96,6 +107,7 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     room: pkg.room_type || null,
     meal: pkg.pansion_description || pkg.pansion || null,
     operator: (pkg.operator && pkg.operator.name) || null,
+    cashback: cashbackFromPage(),
     best: rows.slice(0, 24),
   };
 })()`;
@@ -263,6 +275,7 @@ async function enrichPackageInner(
       packageId,
       totalFlights: last.totalFlights,
       direct12n: offers.length,
+      cashback: last.cashback || null,
       offers,
     };
   } finally {

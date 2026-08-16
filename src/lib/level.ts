@@ -6,8 +6,6 @@ export const LT_KEY = "0fe9fb2ff35679322db5429b18a53aee";
 export const LT_HOTEL_ID = 9162952;
 export const LT_API = "https://api.level.travel";
 export const LT_SITE = "https://tbank.level.travel";
-/** Кэшбек Т-Банка на tbank.level.travel (из tooltip партнёра). */
-export const CASHBACK_RATE = 0.05;
 export const ROOM_NEEDLE = "BLUE PLANET";
 export const PREFERRED_OPERATORS = new Set([2, 3, 7, 8, 70]);
 
