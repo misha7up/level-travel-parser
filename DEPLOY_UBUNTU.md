@@ -132,17 +132,7 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d your.domain.com
 ```
 
-## 5. Обновление кода
-
-```bash
-cd /var/www/level-travel-parser
-sudo -u www-data git pull
-sudo -u www-data npm install
-sudo -u www-data npm run build
-sudo systemctl restart rixos-web
-```
-
-## 6. Firewall
+## 5. Firewall
 
 ```bash
 sudo ufw allow OpenSSH
@@ -155,4 +145,33 @@ sudo ufw enable
 - **Browserless не нужен** на Ubuntu — используется системный Chromium.
 - Не ставь `BROWSERLESS_TOKEN` в env сервиса (иначе снова уйдёт в облако).
 - Vercel можно оставить как зеркало; рабочий поиск с рейсами — на этом сервере.
-- Когда сервер стабилен — имеет смысл расширить воронку топа (больше дней/пакетов), т.к. лимит Browserless больше не давит.
+- Воронка: пакеты по всем дням → enrich ~18 пакетов (12 дешёвых дней + 6 доп.). Chromium один на процесс, картинки/CSS режутся.
+
+## VPS 1 GB / 1 CPU (выжать максимум)
+
+```bash
+# swap 2G — иначе Chromium убьёт OOM
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# в unit: NODE_OPTIONS + CHROME_PATH (см. deploy/rixos-web.service)
+sudo cp /var/www/level-travel-parser/deploy/rixos-web.service /etc/systemd/system/rixos-web.service
+sudo systemctl daemon-reload && sudo systemctl restart rixos-web
+```
+
+Не поднимай 2+ Chromium параллельно (в коде уже очередь на enrich).
+
+## Обновление кода
+
+```bash
+cd /var/www/level-travel-parser
+sudo systemctl stop rixos-web
+sudo -u www-data git pull
+sudo -u www-data npm install
+sudo -u www-data npm run build
+sudo systemctl start rixos-web
+sudo systemctl status rixos-web --no-pager
+```

@@ -160,7 +160,7 @@ export type FlightOffer = {
   why: string;
 };
 
-const ENRICH_BUDGET_MS = 22_000;
+const ENRICH_BUDGET_MS = process.env.VERCEL ? 22_000 : 40_000;
 
 function fmtMoney(n: number) {
   return `${Math.round(n).toLocaleString("ru-RU")} руб.`;
@@ -216,6 +216,20 @@ function resolveChromePath(): string {
   );
 }
 
+/** Один Chromium на процесс (VPS 1GB) — не поднимать браузер на каждый пакет. */
+let sharedBrowser: Browser | null = null;
+let sharedLaunch: Promise<Browser> | null = null;
+let enrichLock: Promise<unknown> = Promise.resolve();
+
+function withEnrichLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = enrichLock.then(fn, fn);
+  enrichLock = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 async function launchBrowser(): Promise<Browser> {
   const puppeteer = await import("puppeteer-core");
   const ws = browserWsEndpoint();
@@ -235,7 +249,7 @@ async function launchBrowser(): Promise<Browser> {
       const args = Array.isArray(chromium.args) ? chromium.args : await chromium.args;
       return puppeteer.default.launch({
         args,
-        defaultViewport: { width: 1440, height: 900 },
+        defaultViewport: { width: 1280, height: 720 },
         executablePath,
         headless: true,
       });
@@ -249,33 +263,80 @@ async function launchBrowser(): Promise<Browser> {
   return puppeteer.default.launch({
     executablePath,
     headless: true,
-    defaultViewport: { width: 1440, height: 900 },
+    defaultViewport: { width: 1280, height: 720 },
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--disable-translate",
+      "--metrics-recording-only",
+      "--mute-audio",
+      "--no-first-run",
       "--font-render-hinting=none",
+      "--js-flags=--max-old-space-size=192",
     ],
   });
 }
 
-async function waitFlights(page: Page, timeoutMs = 12_000) {
-  await sleep(800);
+async function getBrowser(): Promise<{ browser: Browser; shared: boolean }> {
+  const ws = browserWsEndpoint();
+  const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  if (ws || isServerless) {
+    return { browser: await launchBrowser(), shared: false };
+  }
+  if (sharedBrowser) {
+    try {
+      if (sharedBrowser.connected) return { browser: sharedBrowser, shared: true };
+    } catch {
+      sharedBrowser = null;
+      sharedLaunch = null;
+    }
+  }
+  if (!sharedLaunch) {
+    sharedLaunch = launchBrowser().then((b) => {
+      sharedBrowser = b;
+      b.on("disconnected", () => {
+        sharedBrowser = null;
+        sharedLaunch = null;
+      });
+      return b;
+    });
+  }
+  return { browser: await sharedLaunch, shared: true };
+}
+
+async function blockHeavyAssets(page: Page) {
+  await page.setRequestInterception(true);
+  page.on("request", (req) => {
+    const t = req.resourceType();
+    if (t === "image" || t === "media" || t === "font" || t === "stylesheet") {
+      req.abort().catch(() => {});
+    } else {
+      req.continue().catch(() => {});
+    }
+  });
+}
+
+async function waitFlights(page: Page, timeoutMs = 14_000) {
+  await sleep(500);
   const deadline = Date.now() + timeoutMs;
   let last: any = { ok: false };
   while (Date.now() < deadline) {
     last = await page.evaluate(EXTRACT_FLIGHTS_JS);
     if (last?.ok && last.loading === "fetchFinished") {
-      // дать React отрисовать больше карточек после setVisibleFlights
-      await sleep(700);
+      await sleep(500);
       last = await page.evaluate(EXTRACT_FLIGHTS_JS);
       return last;
     }
     if (last?.ok && (last.direct12n || 0) > 0 && (last.cashbackMapped || 0) > 0) {
       return last;
     }
-    await sleep(700);
+    await sleep(600);
   }
   return last;
 }
@@ -286,60 +347,66 @@ async function enrichPackageInner(
 ) {
   const url = `https://tbank.level.travel/packages/${packageId}`;
   let browser: Browser | null = null;
-  const connectedRemote = !!browserWsEndpoint();
+  let shared = false;
   try {
-    browser = await launchBrowser();
+    const got = await getBrowser();
+    browser = got.browser;
+    shared = got.shared;
     const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0");
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 18_000 });
-    const last = await waitFlights(page, 12_000);
-    await page.close();
+    try {
+      await page.setUserAgent("Mozilla/5.0");
+      await blockHeavyAssets(page);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      const last = await waitFlights(page, 14_000);
 
-    if (!last?.ok) {
-      return { ok: false as const, error: last?.error || "no_flights", url, packageId };
-    }
+      if (!last?.ok) {
+        return { ok: false as const, error: last?.error || "no_flights", url, packageId };
+      }
 
-    const offers: FlightOffer[] = (last.best || [])
-      .filter((row: any) => Number(row.hotelNights) === 12)
-      .map((row: any) => {
-        const fo: FlightOffer = {
-          ...row,
-          cashback: typeof row.cashback === "number" ? row.cashback : null,
-          hotelNights: 12,
-          source: "tbank.level.travel",
-          operator: last.operator || meta?.operator || "",
-          room: last.room || meta?.room || "",
-          meal: last.meal || meta?.meal || "",
+      const offers: FlightOffer[] = (last.best || [])
+        .filter((row: any) => Number(row.hotelNights) === 12)
+        .map((row: any) => {
+          const fo: FlightOffer = {
+            ...row,
+            cashback: typeof row.cashback === "number" ? row.cashback : null,
+            hotelNights: 12,
+            source: "tbank.level.travel",
+            operator: last.operator || meta?.operator || "",
+            room: last.room || meta?.room || "",
+            meal: last.meal || meta?.meal || "",
+            url,
+            packageId,
+            why: "",
+          };
+          fo.why = whyText(fo);
+          return fo;
+        });
+
+      if (!offers.length) {
+        return {
+          ok: false as const,
+          error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0})`,
           url,
           packageId,
-          why: "",
         };
-        fo.why = whyText(fo);
-        return fo;
-      });
+      }
 
-    if (!offers.length) {
       return {
-        ok: false as const,
-        error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0})`,
+        ok: true as const,
         url,
         packageId,
+        totalFlights: last.totalFlights,
+        direct12n: offers.length,
+        cashbackMapped: last.cashbackMapped || 0,
+        offers,
       };
+    } finally {
+      await page.close().catch(() => {});
     }
-
-    return {
-      ok: true as const,
-      url,
-      packageId,
-      totalFlights: last.totalFlights,
-      direct12n: offers.length,
-      cashbackMapped: last.cashbackMapped || 0,
-      offers,
-    };
   } finally {
-    if (browser) {
+    if (browser && !shared) {
       try {
-        if (connectedRemote) await browser.disconnect();
+        if (browserWsEndpoint()) await browser.disconnect();
         else await browser.close();
       } catch {
         /* ignore */
@@ -353,18 +420,20 @@ export async function enrichPackage(
   meta?: { operator?: string; room?: string; meal?: string },
 ) {
   const url = `https://tbank.level.travel/packages/${packageId}`;
-  try {
-    return await Promise.race([
-      enrichPackageInner(packageId, meta),
-      sleep(ENRICH_BUDGET_MS).then(() => ({
-        ok: false as const,
-        error: `timeout_${ENRICH_BUDGET_MS / 1000}s`,
-        url,
-        packageId,
-      })),
-    ]);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false as const, error: msg, url, packageId };
-  }
+  return withEnrichLock(async () => {
+    try {
+      return await Promise.race([
+        enrichPackageInner(packageId, meta),
+        sleep(ENRICH_BUDGET_MS).then(() => ({
+          ok: false as const,
+          error: `timeout_${ENRICH_BUDGET_MS / 1000}s`,
+          url,
+          packageId,
+        })),
+      ]);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false as const, error: msg, url, packageId };
+    }
+  });
 }

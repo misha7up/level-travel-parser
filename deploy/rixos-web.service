@@ -10,10 +10,13 @@ WorkingDirectory=/var/www/level-travel-parser
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=HOSTNAME=127.0.0.1
+Environment=NODE_OPTIONS=--max-old-space-size=384
 # Environment=CHROME_PATH=/usr/bin/chromium-browser
 ExecStart=/usr/bin/npm run start
 Restart=on-failure
 RestartSec=5
+# один Chromium + Node на 1GB
+MemoryMax=900M
 
 [Install]
 WantedBy=multi-user.target

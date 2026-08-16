@@ -136,8 +136,11 @@ export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-10-07"); // 20 дней вылета с 18.09
   const [topN, setTopN] = useState(20);
-  const BEST_DAYS = 3;
-  const PACKAGES_PER_BEST_DAY = 3;
+  /** На VPS 1GB: широкий охват дней, но лимит enrich (Chromium тяжёлый). */
+  const PACKAGES_PER_DAY_SCAN = 5;
+  const DAY_COVER = 12; // дешёвый пакет с каждого из N самых дешёвых дней
+  const EXTRA_PACKAGES = 6; // плюс ещё самые дешёвые пакеты по диапазону
+  const PACKAGE_SCAN_CONCURRENCY = 2;
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
@@ -223,7 +226,7 @@ export default function Home() {
     return s > 0 ? `≈ ${m} мин ${s} сек` : `≈ ${m} мин`;
   }
 
-  /** Грубая оценка: ~9с на день пакетов, ~22с на пакет с рейсами. */
+  /** Грубая оценка: ~5с/день пакетов (×2 параллельно), ~18с на пакет с рейсами. */
   function estimateEta(opts: {
     phase: "packages" | "flights";
     dayIdx: number;
@@ -231,11 +234,11 @@ export default function Home() {
     flightIdx: number;
     flights: number;
   }) {
-    const SEC_DAY = 9;
-    const SEC_FLIGHT = 22;
+    const SEC_DAY = 5;
+    const SEC_FLIGHT = 18;
     if (opts.phase === "packages") {
       const daysLeft = Math.max(0, opts.days - opts.dayIdx);
-      return daysLeft * SEC_DAY + opts.flights * SEC_FLIGHT;
+      return Math.ceil(daysLeft / PACKAGE_SCAN_CONCURRENCY) * SEC_DAY + opts.flights * SEC_FLIGHT;
     }
     const flightsLeft = Math.max(0, opts.flights - opts.flightIdx);
     return flightsLeft * SEC_FLIGHT;
@@ -247,9 +250,58 @@ export default function Home() {
     return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
   }
 
+  async function mapPool<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> {
+    const out: R[] = new Array(items.length);
+    let next = 0;
+    async function worker() {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        out[i] = await fn(items[i], i);
+      }
+    }
+    const n = Math.max(1, Math.min(limit, items.length));
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    return out;
+  }
+
+  /** Выбор пакетов под enrich: покрыть дешёвые дни + добрать самые дешёвые пакеты. */
+  function pickPackagesToEnrich(all: PackageRow[]): PackageRow[] {
+    const byDay = new Map<string, PackageRow[]>();
+    for (const p of all) {
+      const list = byDay.get(p.departDate) || [];
+      list.push(p);
+      byDay.set(p.departDate, list);
+    }
+    const dayWinners: PackageRow[] = [];
+    for (const [, list] of byDay) {
+      list.sort((a, b) => a.price - b.price);
+      if (list[0]) dayWinners.push(list[0]);
+    }
+    dayWinners.sort((a, b) => a.price - b.price);
+    const picked: PackageRow[] = [];
+    const seen = new Set<number>();
+    for (const p of dayWinners.slice(0, DAY_COVER)) {
+      picked.push(p);
+      seen.add(p.packageId);
+    }
+    const rest = [...all]
+      .filter((p) => !seen.has(p.packageId))
+      .sort((a, b) => a.price - b.price);
+    for (const p of rest) {
+      if (picked.length >= DAY_COVER + EXTRA_PACKAGES) break;
+      picked.push(p);
+      seen.add(p.packageId);
+    }
+    return picked.sort((a, b) => a.price - b.price);
+  }
+
   /** Hobby: ждём Level в браузере; сервер только короткие вызовы. */
   async function fetchDayPackages(day: string, perDay = 3): Promise<PackageRow[]> {
-    setStatusMsg(`Загружаю ${fmtDateRu(day)}…`);
     const enqRes = await fetchWithTimeout(`/api/lt/enqueue?date=${day}`, 12_000);
     const enq = await enqRes.json();
     if (!enqRes.ok) throw new Error(enq.error || `enqueue ${enqRes.status}`);
@@ -257,7 +309,6 @@ export default function Home() {
 
     let done = false;
     for (let i = 0; i < 30; i++) {
-      setStatusMsg(`Жду туроператоров · ${fmtDateRu(day)}…`);
       const stRes = await fetchWithTimeout(
         `/api/lt/status?requestId=${encodeURIComponent(requestId)}`,
         10_000,
@@ -268,11 +319,10 @@ export default function Home() {
         done = true;
         break;
       }
-      await sleep(1200);
+      await sleep(1000);
     }
-    if (!done) pushLog("  status timeout — забираем офферы как есть…");
+    if (!done) pushLog(`  ${day}: status timeout — забираем офферы как есть…`);
 
-    setStatusMsg(`Собираю пакеты · ${fmtDateRu(day)}…`);
     const pkgRes = await fetchWithTimeout(
       `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}`,
       20_000,
@@ -291,13 +341,13 @@ export default function Home() {
       meal: p.meal || "",
     });
     try {
-      const res = await fetchWithTimeout(`/api/enrich?${q}`, 25_000);
+      const res = await fetchWithTimeout(`/api/enrich?${q}`, 45_000);
       const data = await res.json();
       return { ok: !!data.ok, data };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       const aborted = msg.toLowerCase().includes("abort");
-      return { ok: false, data: { error: aborted ? "timeout_client_25s" : msg } };
+      return { ok: false, data: { error: aborted ? "timeout_client_45s" : msg } };
     }
   }
 
@@ -311,58 +361,52 @@ export default function Home() {
     setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
     const days = dates.length;
-    const flightBudget = BEST_DAYS * PACKAGES_PER_BEST_DAY;
+    const flightBudget = DAY_COVER + EXTRA_PACKAGES;
     const all: PackageRow[] = [];
     try {
       setProgress({ dayIdx: 0, days, flightIdx: 0, flights: flightBudget });
       setEtaSec(estimateEta({ phase: "packages", dayIdx: 0, days, flightIdx: 0, flights: flightBudget }));
 
-      // 1) Сканируем все дни диапазона (без Browserless) — только цены пакетов
-      for (let i = 0; i < dates.length; i++) {
-        const day = dates[i];
-        setProgress({ dayIdx: i, days, flightIdx: 0, flights: flightBudget });
-        setEtaSec(estimateEta({ phase: "packages", dayIdx: i, days, flightIdx: 0, flights: flightBudget }));
+      // 1) Все дни диапазона — пакеты (2 параллельно, ок для 1 CPU)
+      let doneDays = 0;
+      const dayResults = await mapPool(dates, PACKAGE_SCAN_CONCURRENCY, async (day, i) => {
+        setStatusMsg(`Пакеты · ${fmtDateRu(day)} (${i + 1}/${dates.length})…`);
         pushLog(`[${i + 1}/${dates.length}] пакеты ${day}…`);
         try {
-          const pkgs = await fetchDayPackages(day, 3);
-          all.push(...pkgs);
-          setPackages([...all].sort((a, b) => a.price - b.price));
-          pushLog(`  +${pkgs.length} (всего ${all.length})`);
+          const pkgs = await fetchDayPackages(day, PACKAGES_PER_DAY_SCAN);
+          pushLog(`  +${pkgs.length}`);
+          return pkgs;
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           pushLog(`  ошибка: ${msg}`);
+          return [] as PackageRow[];
+        } finally {
+          doneDays += 1;
+          setProgress({ dayIdx: doneDays, days, flightIdx: 0, flights: flightBudget });
+          setEtaSec(
+            estimateEta({
+              phase: "packages",
+              dayIdx: doneDays,
+              days,
+              flightIdx: 0,
+              flights: flightBudget,
+            }),
+          );
         }
-      }
+      });
+      for (const pkgs of dayResults) all.push(...pkgs);
+      setPackages([...all].sort((a, b) => a.price - b.price));
+      pushLog(`Пакеты всего: ${all.length}`);
 
-      // 2) Топ-3 дня с минимальной ценой пакета
-      const dayMin = new Map<string, number>();
-      for (const p of all) {
-        const prev = dayMin.get(p.departDate);
-        if (prev == null || p.price < prev) dayMin.set(p.departDate, p.price);
-      }
-      const rankedDays = [...dayMin.entries()]
-        .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
-        .slice(0, BEST_DAYS);
-      const bestDaySet = new Set(rankedDays.map(([d]) => d));
+      // 2) Широкий отбор: дешёвые дни + доп. дешёвые пакеты (не только 3×3)
+      const toEnrich = pickPackagesToEnrich(all);
+      const daySet = new Set(toEnrich.map((p) => p.departDate));
       pushLog(
-        `Выгодные дни: ${rankedDays.map(([d, pr]) => `${fmtDateRu(d)} (${money(pr)})`).join(", ") || "—"}`,
+        `На рейсы: ${toEnrich.length} пакетов, ${daySet.size} дней (из ${all.length} пакетов)…`,
       );
 
-      const toEnrich: PackageRow[] = [];
-      for (const [day] of rankedDays) {
-        const dayPkgs = all
-          .filter((p) => p.departDate === day)
-          .sort((a, b) => a.price - b.price)
-          .slice(0, PACKAGES_PER_BEST_DAY);
-        toEnrich.push(...dayPkgs);
-      }
       setPhase("flights");
-      setStatusMsg(
-        `Рейсы в ${BEST_DAYS} выгодных днях (туда до 09:00, обратно после 17:00)…`,
-      );
-      pushLog(
-        `Рейсы: ${toEnrich.length} пакетов в ${bestDaySet.size} днях (Browserless, туда <09:00 / обратно ≥17:00)…`,
-      );
+      setStatusMsg(`Рейсы · туда до 09:00, обратно после 17:00…`);
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
@@ -407,7 +451,7 @@ export default function Home() {
       setEtaSec(null);
       if (!collected.length) {
         pushLog(
-          "Подходящих рейсов нет (нужен BROWSERLESS_TOKEN или нет слотов до 09:00 / после 17:00).",
+          "Подходящих рейсов нет (нужен Chromium на сервере или нет слотов до 09:00 / после 17:00).",
         );
       } else {
         pushLog("Готово.");
@@ -454,7 +498,8 @@ export default function Home() {
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
             12 ночей в отеле · только прямые рейсы · Москва.
             <br />
-            Сначала 3 самых дешёвых дня, потом — лучшие рейсы из них.
+            Сначала пакеты по всем дням, потом рейсы по ~18 самым выгодным пакетам
+            (дешёвые дни + доп. дешёвые офферы).
             <br />
             Вылет туда только до 09:00 · обратно только после 17:00.
             <br />
