@@ -501,11 +501,9 @@ export default function Home() {
             Rixos Radamis Blue Planet
           </h1>
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
-            12 ночей в отеле · только прямые рейсы · Москва · ссылки на tbank.level.travel.
+            12 ночей в отеле · только прямые рейсы · Москва.
             <br />
-            Сначала 3 самых дешёвых дня по итогу (цена − кэшбек
-            {cashback ? ` ${cashback.percentLabel}` : " с tbank.level.travel"}), затем в них —
-            лучшие рейсы.
+            Сначала 3 самых дешёвых дня, потом — лучшие рейсы из них.
             <br />
             Вылет туда только до 09:00 · обратно только после 17:00.
             <br />
