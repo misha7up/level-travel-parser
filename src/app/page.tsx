@@ -44,6 +44,24 @@ type FlightOffer = {
   why: string;
 };
 
+type SortKey = "price" | "date";
+type SortDir = "asc" | "desc";
+
+const MONTHS_RU = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
 function daysBetween(from: string, to: string): string[] {
   const out: string[] = [];
   const a = new Date(from + "T12:00:00");
@@ -58,18 +76,26 @@ function money(n: number) {
   return `${Math.round(n).toLocaleString("ru-RU")} ₽`;
 }
 
-function fmtDt(iso: string) {
+function fmtDateRu(iso: string) {
+  const raw = (iso || "").slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!m) return iso || "—";
+  const day = Number(m[3]);
+  const month = Number(m[2]);
+  return `${day} ${MONTHS_RU[month - 1]}`;
+}
+
+function fmtTime(iso: string) {
   try {
     const d = new Date(iso);
-    return d.toLocaleString("ru-RU", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   } catch {
-    return iso;
+    return "—";
   }
+}
+
+function dateKey(isoOrDate: string) {
+  return (isoOrDate || "").slice(0, 10);
 }
 
 export default function Home() {
@@ -82,11 +108,67 @@ export default function Home() {
   const [packages, setPackages] = useState<PackageRow[]>([]);
   const [offers, setOffers] = useState<FlightOffer[]>([]);
   const [phase, setPhase] = useState<"idle" | "packages" | "flights" | "done">("idle");
+  const [offerSort, setOfferSort] = useState<{ key: SortKey; dir: SortDir }>({
+    key: "price",
+    dir: "asc",
+  });
+  const [pkgSort, setPkgSort] = useState<{ key: SortKey; dir: SortDir }>({
+    key: "price",
+    dir: "asc",
+  });
 
   const dates = useMemo(() => daysBetween(dateFrom, dateTo), [dateFrom, dateTo]);
 
+  const sortedOffers = useMemo(() => {
+    const rows = [...offers];
+    rows.sort((a, b) => {
+      // базовый приоритет: рано+поздно выше при равной цене / при ручной сортировке по цене
+      if (offerSort.key === "date") {
+        const da = dateKey(a.checkIn || a.outboundDep);
+        const db = dateKey(b.checkIn || b.outboundDep);
+        const cmp = da.localeCompare(db) || a.price - b.price;
+        return offerSort.dir === "asc" ? cmp : -cmp;
+      }
+      const pref = (b.preferenceScore || 0) - (a.preferenceScore || 0);
+      const priceCmp = a.price - b.price;
+      const cmp = priceCmp || pref;
+      return offerSort.dir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [offers, offerSort]);
+
+  const sortedPackages = useMemo(() => {
+    const rows = [...packages];
+    rows.sort((a, b) => {
+      if (pkgSort.key === "date") {
+        const cmp = a.departDate.localeCompare(b.departDate) || a.price - b.price;
+        return pkgSort.dir === "asc" ? cmp : -cmp;
+      }
+      const cmp = a.price - b.price || a.departDate.localeCompare(b.departDate);
+      return pkgSort.dir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [packages, pkgSort]);
+
   function pushLog(line: string) {
     setLog((prev) => [...prev.slice(-80), line]);
+  }
+
+  function toggleSort(
+    current: { key: SortKey; dir: SortDir },
+    key: SortKey,
+    setter: (v: { key: SortKey; dir: SortDir }) => void,
+  ) {
+    if (current.key === key) {
+      setter({ key, dir: current.dir === "asc" ? "desc" : "asc" });
+    } else {
+      setter({ key, dir: key === "price" ? "asc" : "asc" });
+    }
+  }
+
+  function sortMark(current: { key: SortKey; dir: SortDir }, key: SortKey) {
+    if (current.key !== key) return "";
+    return current.dir === "asc" ? " ↑" : " ↓";
   }
 
   async function run() {
@@ -96,6 +178,7 @@ export default function Home() {
     setPackages([]);
     setOffers([]);
     setLog([]);
+    setOfferSort({ key: "price", dir: "asc" });
     const all: PackageRow[] = [];
     try {
       for (let i = 0; i < dates.length; i++) {
@@ -116,7 +199,7 @@ export default function Home() {
       const sorted = [...all].sort((a, b) => a.price - b.price);
       const toEnrich = sorted.slice(0, enrichTop);
       setPhase("flights");
-      pushLog(`Рейсы (прямые + 12 ночей) по топ-${toEnrich.length} пакетам…`);
+      pushLog(`Рейсы (прямые + 12 ночей, приоритет рано/поздно) по топ-${toEnrich.length}…`);
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
@@ -136,15 +219,14 @@ export default function Home() {
         }
         pushLog(`  flights=${data.totalFlights} direct12=${data.direct12n}`);
         collected.push(...(data.offers || []));
-        // live top
-        const uniq = dedupeRank(collected).slice(0, topN);
-        setOffers(uniq);
+        setOffers(dedupeRank(collected).slice(0, topN));
       }
       setOffers(dedupeRank(collected).slice(0, topN));
       setPhase("done");
       pushLog("Готово.");
-    } catch (e: any) {
-      pushLog(`Сбой: ${e?.message || e}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      pushLog(`Сбой: ${msg}`);
       setPhase("idle");
     } finally {
       setRunning(false);
@@ -160,8 +242,10 @@ export default function Home() {
             Rixos Radamis Blue Planet
           </h1>
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
-            12 ночей в отеле · только прямые рейсы · Москва. Нажми «Обновить» — соберёт все даты
-            диапазона и топ выгодных слотов.
+            12 ночей в отеле · только прямые рейсы · Москва.
+            <br />
+            Нажми «Обновить» — соберёт все даты диапазона. В топе приоритет: ранний вылет из Москвы
+            (до 08:00) и поздний из Египта (после 18:00).
           </p>
         </header>
 
@@ -185,7 +269,7 @@ export default function Home() {
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="text-[#7db89a]">Топ в выдаче</span>
+            <span className="text-[#7db89a]">Сколько вариантов показать</span>
             <input
               type="number"
               min={5}
@@ -194,9 +278,10 @@ export default function Home() {
               onChange={(e) => setTopN(Number(e.target.value) || 10)}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
+            <span className="text-xs text-[#6a8578]">например 10 — топ‑10 в таблице</span>
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="text-[#7db89a]">Пакетов для рейсов</span>
+            <span className="text-[#7db89a]">Сколько дешёвых пакетов проверить на рейсы</span>
             <input
               type="number"
               min={3}
@@ -205,6 +290,7 @@ export default function Home() {
               onChange={(e) => setEnrichTop(Number(e.target.value) || 12)}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
+            <span className="text-xs text-[#6a8578]">больше = дольше, но меньше шанс пропустить выгодный рейс</span>
           </label>
           <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-1">
             <button
@@ -224,52 +310,84 @@ export default function Home() {
         </section>
 
         <section className="mt-8">
-          <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ прямых + 12 ночей</h2>
+          <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ: прямые + 12 ночей</h2>
           {!offers.length && (
             <p className="text-[#7a9488]">
               Пока пусто. После обновления здесь появятся лучшие варианты с рейсами.
             </p>
           )}
-          <ol className="space-y-3">
-            {offers.map((o, i) => (
-              <li
-                key={`${o.packageId}-${o.outboundFlight}-${o.returnFlight}-${o.outboundDep}-${i}`}
-                className="rounded-xl border border-[#243a32] bg-[#111a17] p-4"
-              >
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-xl font-medium text-[#f3f7f4]">
-                    #{i + 1} {money(o.price)}
-                  </span>
-                  <span className="text-sm text-[#8aa597]">{o.operator}</span>
-                </div>
-                <p className="mt-1 text-sm text-[#9bb5a8]">
-                  {o.room} · {o.meal}
-                </p>
-                <p className="mt-2 text-sm">
-                  Отель: {o.checkIn} → {o.checkOut} (12 ночей)
-                </p>
-                <p className="mt-1 text-sm">
-                  Туда: {fmtDt(o.outboundDep)} {o.outboundFrom}→{o.outboundTo} {o.outboundAirline}{" "}
-                  {o.outboundFlight}
-                  {o.earlyOut ? " · рано" : ""}
-                </p>
-                <p className="text-sm">
-                  Обратно: {fmtDt(o.returnDep)} {o.returnFrom}→{o.returnTo} {o.returnAirline}{" "}
-                  {o.returnFlight}
-                  {o.lateBack ? " · поздно" : ""}
-                </p>
-                <p className="mt-2 text-sm text-[#7db89a]">Почему выгодно: {o.why}</p>
-                <a
-                  href={o.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-2 inline-block text-sm text-[#6ecf9c] underline underline-offset-2"
-                >
-                  Открыть на Level
-                </a>
-              </li>
-            ))}
-          </ol>
+          {!!offers.length && (
+            <div className="overflow-x-auto rounded-xl border border-[#243a32]">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-[#15211d] text-[#7db89a]">
+                  <tr>
+                    <th className="px-3 py-2">#</th>
+                    <th className="px-3 py-2">
+                      <button
+                        type="button"
+                        className="hover:text-[#cfe3d8]"
+                        onClick={() => toggleSort(offerSort, "price", setOfferSort)}
+                      >
+                        Цена{sortMark(offerSort, "price")}
+                      </button>
+                    </th>
+                    <th className="px-3 py-2">
+                      <button
+                        type="button"
+                        className="hover:text-[#cfe3d8]"
+                        onClick={() => toggleSort(offerSort, "date", setOfferSort)}
+                      >
+                        Дата{sortMark(offerSort, "date")}
+                      </button>
+                    </th>
+                    <th className="px-3 py-2">Туда</th>
+                    <th className="px-3 py-2">Обратно</th>
+                    <th className="px-3 py-2">Оператор</th>
+                    <th className="px-3 py-2">Ссылка</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedOffers.map((o, i) => (
+                    <tr
+                      key={`${o.packageId}-${o.outboundFlight}-${o.returnFlight}-${o.outboundDep}-${i}`}
+                      className="border-t border-[#1e332c]"
+                    >
+                      <td className="px-3 py-2 text-[#8aa597]">{i + 1}</td>
+                      <td className="px-3 py-2 whitespace-nowrap font-medium">{money(o.price)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {fmtDateRu(o.checkIn || o.outboundDep)}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {fmtTime(o.outboundDep)} {o.outboundFrom}→{o.outboundTo}
+                        <span className="block text-xs text-[#8aa597]">
+                          {o.outboundAirline} {o.outboundFlight}
+                          {o.earlyOut ? " · рано" : ""}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {fmtTime(o.returnDep)} {o.returnFrom}→{o.returnTo}
+                        <span className="block text-xs text-[#8aa597]">
+                          {o.returnAirline} {o.returnFlight}
+                          {o.lateBack ? " · поздно" : ""}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">{o.operator}</td>
+                      <td className="px-3 py-2">
+                        <a
+                          href={o.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[#6ecf9c] underline underline-offset-2"
+                        >
+                          Level
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         <section className="mt-10">
@@ -278,23 +396,37 @@ export default function Home() {
             <table className="min-w-full text-left text-sm">
               <thead className="bg-[#15211d] text-[#7db89a]">
                 <tr>
-                  <th className="px-3 py-2">Цена</th>
-                  <th className="px-3 py-2">Вылет</th>
+                  <th className="px-3 py-2">
+                    <button
+                      type="button"
+                      className="hover:text-[#cfe3d8]"
+                      onClick={() => toggleSort(pkgSort, "price", setPkgSort)}
+                    >
+                      Цена{sortMark(pkgSort, "price")}
+                    </button>
+                  </th>
+                  <th className="px-3 py-2">
+                    <button
+                      type="button"
+                      className="hover:text-[#cfe3d8]"
+                      onClick={() => toggleSort(pkgSort, "date", setPkgSort)}
+                    >
+                      Дата{sortMark(pkgSort, "date")}
+                    </button>
+                  </th>
                   <th className="px-3 py-2">Оператор</th>
-                  <th className="px-3 py-2">Номер</th>
                   <th className="px-3 py-2">Ссылка</th>
                 </tr>
               </thead>
               <tbody>
-                {packages.slice(0, 40).map((p) => (
+                {sortedPackages.slice(0, 40).map((p) => (
                   <tr key={p.packageId} className="border-t border-[#1e332c]">
                     <td className="px-3 py-2 whitespace-nowrap">{money(p.price)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{p.departDate}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{fmtDateRu(p.departDate)}</td>
                     <td className="px-3 py-2">{p.operator}</td>
-                    <td className="px-3 py-2 max-w-[220px] truncate">{p.room}</td>
                     <td className="px-3 py-2">
                       <a href={p.url} target="_blank" rel="noreferrer" className="text-[#6ecf9c]">
-                        {p.packageId}
+                        Level
                       </a>
                     </td>
                   </tr>
@@ -315,15 +447,21 @@ export default function Home() {
   );
 }
 
+/** Цена ↑, при равной — выше score рано/поздно; до 2 слотов на пакет, сначала с лучшим score. */
 function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
   const seen = new Set<string>();
   const unique: FlightOffer[] = [];
   const sorted = [...rows].sort(
-    (a, b) => a.price - b.price || (b.preferenceScore || 0) - (a.preferenceScore || 0),
+    (a, b) =>
+      a.price - b.price ||
+      (b.preferenceScore || 0) - (a.preferenceScore || 0) ||
+      a.outboundDep.localeCompare(b.outboundDep),
   );
   const perPkg = new Map<number, number>();
   for (const r of sorted) {
-    const key = [r.price, r.outboundDep, r.returnDep, r.outboundFlight, r.returnFlight, r.packageId].join("|");
+    const key = [r.price, r.outboundDep, r.returnDep, r.outboundFlight, r.returnFlight, r.packageId].join(
+      "|",
+    );
     if (seen.has(key)) continue;
     const n = perPkg.get(r.packageId) || 0;
     if (n >= 2) continue;
@@ -331,5 +469,11 @@ function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
     perPkg.set(r.packageId, n + 1);
     unique.push(r);
   }
+  // финальный порядок топа: сначала максимальный preference при близкой цене —
+  // внутри уже отсортировано по цене; дополнительно поднимем score=2 выше score=0 при той же цене
+  unique.sort(
+    (a, b) =>
+      a.price - b.price || (b.preferenceScore || 0) - (a.preferenceScore || 0),
+  );
   return unique;
 }
