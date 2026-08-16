@@ -151,9 +151,10 @@ function altNote(o: FlightOffer, cheapest: FlightOffer | null): string {
 
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
-  const [dateTo, setDateTo] = useState("2026-09-28");
+  const [dateTo, setDateTo] = useState("2026-10-07"); // 20 дней вылета с 18.09
   const [topN, setTopN] = useState(20);
-  const enrichTop = 12;
+  const BEST_DAYS = 3;
+  const PACKAGES_PER_BEST_DAY = 3;
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
@@ -328,15 +329,17 @@ export default function Home() {
     setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
     const days = dates.length;
+    const flightBudget = BEST_DAYS * PACKAGES_PER_BEST_DAY;
     const all: PackageRow[] = [];
     try {
-      setProgress({ dayIdx: 0, days, flightIdx: 0, flights: enrichTop });
-      setEtaSec(estimateEta({ phase: "packages", dayIdx: 0, days, flightIdx: 0, flights: enrichTop }));
+      setProgress({ dayIdx: 0, days, flightIdx: 0, flights: flightBudget });
+      setEtaSec(estimateEta({ phase: "packages", dayIdx: 0, days, flightIdx: 0, flights: flightBudget }));
 
+      // 1) Сканируем все дни диапазона (без Browserless) — только цены пакетов
       for (let i = 0; i < dates.length; i++) {
         const day = dates[i];
-        setProgress({ dayIdx: i, days, flightIdx: 0, flights: enrichTop });
-        setEtaSec(estimateEta({ phase: "packages", dayIdx: i, days, flightIdx: 0, flights: enrichTop }));
+        setProgress({ dayIdx: i, days, flightIdx: 0, flights: flightBudget });
+        setEtaSec(estimateEta({ phase: "packages", dayIdx: i, days, flightIdx: 0, flights: flightBudget }));
         pushLog(`[${i + 1}/${dates.length}] пакеты ${day}…`);
         try {
           const pkgs = await fetchDayPackages(day, 3);
@@ -349,10 +352,36 @@ export default function Home() {
         }
       }
 
-      const sorted = [...all].sort((a, b) => a.price - b.price);
-      const toEnrich = sorted.slice(0, enrichTop);
+      // 2) Топ-3 дня с минимальной ценой пакета (явно дешевле остальных)
+      const dayMin = new Map<string, number>();
+      for (const p of all) {
+        const prev = dayMin.get(p.departDate);
+        if (prev == null || p.price < prev) dayMin.set(p.departDate, p.price);
+      }
+      const rankedDays = [...dayMin.entries()]
+        .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
+        .slice(0, BEST_DAYS);
+      const bestDaySet = new Set(rankedDays.map(([d]) => d));
+      pushLog(
+        `Выгодные дни: ${rankedDays.map(([d, pr]) => `${fmtDateRu(d)} (${money(pr)})`).join(", ") || "—"}`,
+      );
+
+      // 3) В этих днях — самые дешёвые пакеты → Browserless за рейсами
+      const toEnrich: PackageRow[] = [];
+      for (const [day] of rankedDays) {
+        const dayPkgs = all
+          .filter((p) => p.departDate === day)
+          .sort((a, b) => a.price - b.price)
+          .slice(0, PACKAGES_PER_BEST_DAY);
+        toEnrich.push(...dayPkgs);
+      }
       setPhase("flights");
-      pushLog(`Рейсы по ${toEnrich.length} пакетам (таймаут 25с, без вечного retry)…`);
+      setStatusMsg(
+        `Рейсы в ${BEST_DAYS} выгодных днях (туда до 09:00, обратно после 17:00)…`,
+      );
+      pushLog(
+        `Рейсы: ${toEnrich.length} пакетов в ${bestDaySet.size} днях (Browserless, туда <09:00 / обратно ≥17:00)…`,
+      );
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
@@ -374,10 +403,16 @@ export default function Home() {
             pushLog(`  skip: ${data.error || "no flights"}`);
             continue;
           }
-          pushLog(`  flights=${data.totalFlights} direct12=${data.direct12n}`);
-          collected.push(
-            ...(data.offers || []).filter((o: FlightOffer) => Number(o.hotelNights) === 12),
+          const filtered = (data.offers || []).filter(
+            (o: FlightOffer) =>
+              Number(o.hotelNights) === 12 &&
+              outMin(o) < 9 * 60 &&
+              retMin(o) >= 17 * 60,
           );
+          pushLog(
+            `  flights=${data.totalFlights} match=${filtered.length} (12н + слоты времени)`,
+          );
+          collected.push(...filtered);
           setOffers(dedupeRank(collected).slice(0, topN));
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -390,10 +425,10 @@ export default function Home() {
       setEtaSec(null);
       if (!collected.length) {
         pushLog(
-          "Рейсы не собрались (нужен BROWSERLESS_TOKEN в Vercel). Ниже — пакеты с 12н в отеле, рейсы выбирай на Level.",
+          "Подходящих рейсов нет (нужен BROWSERLESS_TOKEN или нет слотов до 09:00 / после 17:00).",
         );
       } else {
-        pushLog("Готово (в топе только прямые + 12 ночей в отеле).");
+        pushLog("Готово.");
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -437,7 +472,11 @@ export default function Home() {
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
             12 ночей в отеле · только прямые рейсы · Москва.
             <br />
-            Нажми «Обновить» — соберёт все даты диапазона.
+            Сначала ищем 3 самых дешёвых дня во всём диапазоне, затем в них — лучшие рейсы.
+            <br />
+            Вылет туда только до 09:00 · обратно только после 17:00.
+            <br />
+            Нажми «Обновить».
           </p>
         </header>
 
@@ -539,14 +578,14 @@ export default function Home() {
                         {fmtTime(o.outboundDep)} {o.outboundFrom}→{o.outboundTo}
                         <span className="block text-xs text-[#8aa597]">
                           {o.outboundAirline} {o.outboundFlight}
-                          {o.earlyOut ? " · рано" : ""}
+                          {o.earlyOut ? " · до 09:00" : ""}
                         </span>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         {fmtTime(o.returnDep)} {o.returnFrom}→{o.returnTo}
                         <span className="block text-xs text-[#8aa597]">
                           {o.returnAirline} {o.returnFlight}
-                          {o.lateBack ? " · поздно" : ""}
+                          {o.lateBack ? " · после 17:00" : ""}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-xs text-[#9bb5a8] max-w-[220px]">

@@ -54,8 +54,11 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     const ret = new Date(b.departure);
     const outMin = out.getHours() * 60 + out.getMinutes();
     const retMin = ret.getHours() * 60 + ret.getMinutes();
-    const early = outMin < 8 * 60;
-    const late = retMin >= 18 * 60;
+    // только: туда до 09:00, обратно после 17:00
+    if (outMin >= 9 * 60) continue;
+    if (retMin < 17 * 60) continue;
+    const early = outMin < 9 * 60;
+    const late = retMin >= 17 * 60;
     // выше = лучше: раньше туда + позже обратно
     const preferenceScore = (24 * 60 - outMin) + retMin;
     rows.push({
@@ -137,11 +140,11 @@ function fmtMoney(n: number) {
 function whyText(row: FlightOffer) {
   const parts = [`прямые рейсы, 12 ночей в отеле, ${fmtMoney(row.price)}`];
   if (row.earlyOut && row.lateBack) {
-    parts.push("ранний вылет из Москвы до 08:00 и поздний из Египта после 18:00");
+    parts.push("вылет до 09:00 и возврат после 17:00");
   } else if (row.earlyOut) {
-    parts.push("ранний вылет из Москвы до 08:00");
+    parts.push("вылет до 09:00");
   } else if (row.lateBack) {
-    parts.push("поздний вылет из Египта после 18:00");
+    parts.push("возврат после 17:00");
   }
   return parts.join("; ");
 }
