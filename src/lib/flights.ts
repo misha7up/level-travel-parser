@@ -1,8 +1,11 @@
 import { existsSync } from "fs";
 import type { Browser, Page } from "puppeteer-core";
 
-/** Runs in page context: only direct flights with hotel nights_count === 12. */
-export const EXTRACT_FLIGHTS_JS = `(() => {
+/** Runs in page context: direct flights with hotel nights_count === needNights. */
+export function buildExtractFlightsJs(hotelNights: number): string {
+  const need = hotelNights === 12 ? 12 : 10;
+  return `(() => {
+  const NEED_NIGHTS = ${need};
   function findStore() {
     const root = document.getElementById('checkout_page') || document.body;
     let store = null;
@@ -27,7 +30,6 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     return store;
   }
 
-  /** Суммы «Кешбек + N» с карточек (не процент из tooltip). */
   function scrapeCashbackByPrice() {
     const map = {};
     const nodes = document.querySelectorAll('div');
@@ -69,7 +71,7 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
   for (const f of all) {
     const di = f.datesInfo || {};
     if (!isDirect(f)) continue;
-    if (Number(di.nights_count) !== 12) continue;
+    if (Number(di.nights_count) !== NEED_NIGHTS) continue;
     const to = f.to;
     const b = back0(f);
     if (!to || !b) continue;
@@ -116,7 +118,7 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     ok: true,
     loading,
     totalFlights: all.length,
-    direct12n: rows.length,
+    matchCount: rows.length,
     packageHotelNights: pkgNights || null,
     packagePrice: pkg.price || pkg.net_price || null,
     room: pkg.room_type || null,
@@ -126,6 +128,7 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     best: rows.slice(0, 24),
   };
 })()`;
+}
 
 export type FlightOffer = {
   price: number;
@@ -167,7 +170,8 @@ function fmtMoney(n: number) {
 }
 
 function whyText(row: FlightOffer) {
-  const parts = [`прямые рейсы, 12 ночей в отеле, ${fmtMoney(row.price)}`];
+  const nights = row.hotelNights || 10;
+  const parts = [`прямые рейсы, ${nights} ночей в отеле, ${fmtMoney(row.price)}`];
   if (row.earlyOut && row.lateBack) {
     parts.push("вылет до 09:00 и возврат после 17:00");
   } else if (row.earlyOut) {
@@ -337,18 +341,19 @@ async function blockHeavyAssets(page: Page) {
   });
 }
 
-async function waitFlights(page: Page, timeoutMs = 14_000) {
+async function waitFlights(page: Page, hotelNights: number, timeoutMs = 14_000) {
+  const extractJs = buildExtractFlightsJs(hotelNights);
   await sleep(500);
   const deadline = Date.now() + timeoutMs;
   let last: any = { ok: false };
   while (Date.now() < deadline) {
-    last = await page.evaluate(EXTRACT_FLIGHTS_JS);
+    last = await page.evaluate(extractJs);
     if (last?.ok && last.loading === "fetchFinished") {
       await sleep(500);
-      last = await page.evaluate(EXTRACT_FLIGHTS_JS);
+      last = await page.evaluate(extractJs);
       return last;
     }
-    if (last?.ok && (last.direct12n || 0) > 0 && (last.cashbackMapped || 0) > 0) {
+    if (last?.ok && (last.matchCount || 0) > 0 && (last.cashbackMapped || 0) > 0) {
       return last;
     }
     await sleep(600);
@@ -358,8 +363,9 @@ async function waitFlights(page: Page, timeoutMs = 14_000) {
 
 async function enrichPackageInner(
   packageId: number,
-  meta?: { operator?: string; room?: string; meal?: string },
+  meta?: { operator?: string; room?: string; meal?: string; hotelNights?: number },
 ) {
+  const hotelNights = meta?.hotelNights === 12 ? 12 : 10;
   const url = `https://tbank.level.travel/packages/${packageId}`;
   let browser: Browser | null = null;
   let shared = false;
@@ -372,19 +378,19 @@ async function enrichPackageInner(
       await page.setUserAgent("Mozilla/5.0");
       await blockHeavyAssets(page);
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      const last = await waitFlights(page, 14_000);
+      const last = await waitFlights(page, hotelNights, 14_000);
 
       if (!last?.ok) {
         return { ok: false as const, error: last?.error || "no_flights", url, packageId };
       }
 
       const offers: FlightOffer[] = (last.best || [])
-        .filter((row: any) => Number(row.hotelNights) === 12)
+        .filter((row: any) => Number(row.hotelNights) === hotelNights)
         .map((row: any) => {
           const fo: FlightOffer = {
             ...row,
             cashback: typeof row.cashback === "number" ? row.cashback : null,
-            hotelNights: 12,
+            hotelNights,
             source: "tbank.level.travel",
             operator: last.operator || meta?.operator || "",
             room: last.room || meta?.room || "",
@@ -400,7 +406,7 @@ async function enrichPackageInner(
       if (!offers.length) {
         return {
           ok: false as const,
-          error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0})`,
+          error: `no_direct_${hotelNights}_hotel_nights (flights=${last.totalFlights || 0})`,
           url,
           packageId,
         };
@@ -411,7 +417,7 @@ async function enrichPackageInner(
         url,
         packageId,
         totalFlights: last.totalFlights,
-        direct12n: offers.length,
+        matchCount: offers.length,
         cashbackMapped: last.cashbackMapped || 0,
         offers,
       };
@@ -432,7 +438,7 @@ async function enrichPackageInner(
 
 export async function enrichPackage(
   packageId: number,
-  meta?: { operator?: string; room?: string; meal?: string },
+  meta?: { operator?: string; room?: string; meal?: string; hotelNights?: number },
 ) {
   const url = `https://tbank.level.travel/packages/${packageId}`;
   return withEnrichLock(async () => {

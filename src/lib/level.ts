@@ -108,13 +108,14 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export async function ltEnqueue(dayIso: string): Promise<string> {
+export async function ltEnqueue(dayIso: string, hotelNights = 10): Promise<string> {
   const [y, m, d] = dayIso.split("-");
+  const nights = hotelNights === 12 ? 12 : 10;
   const payload = await ltGet("/search/enqueue", {
     from_city: "Moscow",
     to_country: "EG",
     hotel_ids: String(LT_HOTEL_ID),
-    nights: "12",
+    nights: String(nights),
     adults: "2",
     start_date: `${d}.${m}.${y}`,
     stars_from: "1",
@@ -162,8 +163,9 @@ function isBluePlanet(offer: any): boolean {
   return room.toUpperCase().includes(ROOM_NEEDLE) || roomRu.toUpperCase().includes(ROOM_NEEDLE);
 }
 
-export function pickOffers(offers: any[], limit = 3): any[] {
-  const bp = offers.filter((o) => isBluePlanet(o) && Number(o.nights_count || 0) === 12);
+export function pickOffers(offers: any[], limit = 3, hotelNights = 10): any[] {
+  const need = hotelNights === 12 ? 12 : 10;
+  const bp = offers.filter((o) => isBluePlanet(o) && Number(o.nights_count || 0) === need);
   bp.sort((a, b) => {
     const ap = PREFERRED_OPERATORS.has(Number(a.operator)) ? 0 : 1;
     const bp_ = PREFERRED_OPERATORS.has(Number(b.operator)) ? 0 : 1;
@@ -201,7 +203,9 @@ export async function packagesFromRequest(
   dayIso: string,
   perDay = 3,
   statusPayload?: any,
+  hotelNights = 10,
 ): Promise<PackageRow[]> {
+  const need = hotelNights === 12 ? 12 : 10;
   const ops = ltOkOperators(statusPayload || (await ltStatusOnce(requestId)).raw);
   const offersPayload = await ltGet("/search/get_hotel_offers", {
     request_id: requestId,
@@ -209,14 +213,14 @@ export async function packagesFromRequest(
     operator_ids: ops.join(","),
   });
   const offers = offersPayload.hotel_offers || [];
-  const picked = pickOffers(offers, perDay);
+  const picked = pickOffers(offers, perDay, need);
   const packages: PackageRow[] = [];
   for (const o of picked) {
     const go = await ltGet("/search/get_offer", { request_id: requestId, tour_id: o.id });
     const pkg = go.package || {};
     if (!pkg.id) continue;
     const nights = Number(pkg.dates_info?.nights_count ?? o.nights_count ?? 0);
-    if (nights !== 12) continue;
+    if (nights !== need) continue;
     packages.push({
       departDate: dayIso,
       tourId: o.id,
@@ -224,7 +228,7 @@ export async function packagesFromRequest(
       price: Math.round(Number(pkg.price || o.price || 0)),
       room: pkg.room_type || o.room_type || "",
       meal: pkg.pansion_description || "",
-      nights: 12,
+      nights: need,
       checkIn: pkg.dates_info?.check_in || "",
       checkOut: pkg.dates_info?.check_out || "",
       packageId: pkg.id,
@@ -234,8 +238,12 @@ export async function packagesFromRequest(
   return packages;
 }
 
-export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[]> {
-  const rid = await ltEnqueue(dayIso);
+export async function searchDay(
+  dayIso: string,
+  perDay = 3,
+  hotelNights = 10,
+): Promise<PackageRow[]> {
+  const rid = await ltEnqueue(dayIso, hotelNights);
   const status = await ltWaitStatus(rid);
-  return packagesFromRequest(rid, dayIso, perDay, status);
+  return packagesFromRequest(rid, dayIso, perDay, status, hotelNights);
 }

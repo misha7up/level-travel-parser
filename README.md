@@ -1,6 +1,6 @@
 # Rixos Blue Planet — Level.Travel search UI
 
-Next.js app: даты → пакеты Level → прямые рейсы (12 ночей в отеле) → топ выгодных.
+Next.js app: даты → пакеты Level → прямые рейсы (10 или 12 ночей в отеле, по умолчанию 10) → топ выгодных.
 
 ## Ubuntu (рекомендуется для рейсов)
 
@@ -20,7 +20,7 @@ npm run dev
 
 Открой http://localhost:3000 → выставь даты → **Обновить**.
 
-Фильтр: только **12 ночей в отеле** (`datesInfo.nights_count === 12`) + прямые рейсы. «Тур на 12» с 11 ночами в отеле отбрасывается.
+Фильтр: **10 или 12 ночей в отеле** (`datesInfo.nights_count`) + прямые рейсы. «Тур на N» с меньшим числом ночей в отеле отбрасывается.
 
 ## Vercel (Hobby) — рейсы
 
@@ -40,5 +40,5 @@ Chromium-pack на Hobby **зависает** (скачивание ~66MB). Ва
 - `GET /api/lt/enqueue?date=2026-09-22`
 - `GET /api/lt/status?requestId=...`
 - `GET /api/lt/packages?requestId=...&date=...&perDay=3`
-- `GET /api/enrich?packageId=404272259` — прямые + строго 12 ночей в отеле
+- `GET /api/enrich?packageId=404272259&nights=10` — прямые + N ночей в отеле
 - `GET /api/day?...` — старый монолит (можно не использовать)

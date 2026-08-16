@@ -135,6 +135,7 @@ function prefScore(o: FlightOffer) {
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-10-07"); // 20 дней вылета с 18.09
+  const [hotelNights, setHotelNights] = useState<10 | 12>(10);
   const [topN, setTopN] = useState(25);
   /** На VPS 1GB: широкий охват дней, но лимит enrich (Chromium тяжёлый). */
   const PACKAGES_PER_DAY_SCAN = 5;
@@ -302,7 +303,10 @@ export default function Home() {
 
   /** Hobby: ждём Level в браузере; сервер только короткие вызовы. */
   async function fetchDayPackages(day: string, perDay = 3): Promise<PackageRow[]> {
-    const enqRes = await fetchWithTimeout(`/api/lt/enqueue?date=${day}`, 12_000);
+    const enqRes = await fetchWithTimeout(
+      `/api/lt/enqueue?date=${day}&nights=${hotelNights}`,
+      12_000,
+    );
     const enq = await enqRes.json();
     if (!enqRes.ok) throw new Error(enq.error || `enqueue ${enqRes.status}`);
     const requestId = enq.requestId as string;
@@ -324,7 +328,7 @@ export default function Home() {
     if (!done) pushLog(`  ${day}: status timeout — забираем офферы как есть…`);
 
     const pkgRes = await fetchWithTimeout(
-      `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}`,
+      `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}&nights=${hotelNights}`,
       20_000,
     );
     const pkgData = await pkgRes.json();
@@ -339,6 +343,7 @@ export default function Home() {
       operator: p.operator || "",
       room: p.room || "",
       meal: p.meal || "",
+      nights: String(hotelNights),
     });
     try {
       const res = await fetchWithTimeout(`/api/enrich?${q}`, 45_000);
@@ -430,7 +435,7 @@ export default function Home() {
           }
           const filtered = (data.offers || []).filter(
             (o: FlightOffer) =>
-              Number(o.hotelNights) === 12 &&
+              Number(o.hotelNights) === hotelNights &&
               outMin(o) < 9 * 60 &&
               retMin(o) >= 17 * 60,
           );
@@ -439,13 +444,13 @@ export default function Home() {
             `  flights=${data.totalFlights} match=${filtered.length} cashback=${withCb}/${filtered.length}`,
           );
           collected.push(...filtered);
-          setOffers(dedupeRank(collected).slice(0, topN));
+          setOffers(dedupeRank(collected, hotelNights).slice(0, topN));
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           pushLog(`  skip: ${msg}`);
         }
       }
-      setOffers(dedupeRank(collected).slice(0, topN));
+      setOffers(dedupeRank(collected, hotelNights).slice(0, topN));
       setPhase("done");
       setStatusMsg("");
       setEtaSec(null);
@@ -494,7 +499,7 @@ export default function Home() {
             Rixos Radamis Blue Planet
           </h1>
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
-            12 ночей в отеле · только прямые рейсы · Москва.
+            Ночи в отеле · только прямые рейсы · Москва.
             <br />
             Вылет туда только до 09:00 · обратно только после 17:00.
             <br />
@@ -502,13 +507,14 @@ export default function Home() {
           </p>
         </header>
 
-        <section className="grid gap-4 rounded-2xl border border-[#243a32] bg-[#111a17] p-4 sm:grid-cols-2 lg:grid-cols-3 sm:p-5">
+        <section className="grid gap-4 rounded-2xl border border-[#243a32] bg-[#111a17] p-4 sm:grid-cols-2 lg:grid-cols-4 sm:p-5">
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-[#7db89a]">Вылет с</span>
             <input
               type="date"
               value={dateFrom}
               onChange={(e) => setDateFrom(e.target.value)}
+              disabled={running}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
           </label>
@@ -518,8 +524,21 @@ export default function Home() {
               type="date"
               value={dateTo}
               onChange={(e) => setDateTo(e.target.value)}
+              disabled={running}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-[#7db89a]">Ночей в отеле</span>
+            <select
+              value={hotelNights}
+              onChange={(e) => setHotelNights(Number(e.target.value) === 12 ? 12 : 10)}
+              disabled={running}
+              className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
+            >
+              <option value={10}>10</option>
+              <option value={12}>12</option>
+            </select>
           </label>
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-[#7db89a]">Сколько вариантов показать</span>
@@ -528,12 +547,13 @@ export default function Home() {
               min={5}
               max={40}
               value={topN}
-              onChange={(e) => setTopN(Number(e.target.value) || 20)}
+              onChange={(e) => setTopN(Number(e.target.value) || 25)}
+              disabled={running}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
             <span className="text-xs text-[#6a8578]">по умолчанию 25</span>
           </label>
-          <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 pt-1">
+          <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-1">
             <button
               type="button"
               disabled={running || !dates.length}
@@ -546,7 +566,9 @@ export default function Home() {
         </section>
 
         <section className="mt-8">
-          <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ: прямые + 12 ночей</h2>
+          <h2 className="mb-3 text-lg text-[#cfe3d8]">
+            Топ: прямые + {hotelNights} ночей
+          </h2>
           {!offers.length && (
             <p className="text-[#7a9488]">Пока пусто.</p>
           )}
@@ -677,11 +699,12 @@ export default function Home() {
 }
 
 /** По итогу (цена − кэшбек с карточки) ↑; до 4 слотов на пакет. */
-function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
+function dedupeRank(rows: FlightOffer[], hotelNights: number): FlightOffer[] {
+  const need = hotelNights === 12 ? 12 : 10;
   const seen = new Set<string>();
   const unique: FlightOffer[] = [];
   const sorted = [...rows]
-    .filter((r) => Number(r.hotelNights) === 12)
+    .filter((r) => Number(r.hotelNights) === need)
     .sort(
       (a, b) =>
         netOf(a.price, a.cashback) - netOf(b.price, b.cashback) ||

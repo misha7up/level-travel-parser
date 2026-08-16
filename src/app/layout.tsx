@@ -20,7 +20,7 @@ const display = Libre_Baskerville({
 
 export const metadata: Metadata = {
   title: "Rixos Blue Planet · Level.Travel",
-  description: "Поиск туров Blue Planet: 12 ночей, прямые рейсы",
+  description: "Поиск туров Blue Planet: 10 или 12 ночей, прямые рейсы",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
