@@ -46,7 +46,6 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
   for (const f of all) {
     const di = f.datesInfo || {};
     if (!isDirect(f)) continue;
-    // строго: ночи именно в отеле
     if (Number(di.nights_count) !== 12) continue;
     const to = f.to;
     const b = back0(f);
@@ -121,6 +120,8 @@ export type FlightOffer = {
   why: string;
 };
 
+const ENRICH_BUDGET_MS = 22_000;
+
 function fmtMoney(n: number) {
   return `${Math.round(n).toLocaleString("ru-RU")} руб.`;
 }
@@ -141,25 +142,42 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function browserWsEndpoint(): string | null {
+  if (process.env.BROWSER_WS_ENDPOINT) return process.env.BROWSER_WS_ENDPOINT;
+  const token = process.env.BROWSERLESS_TOKEN;
+  if (token) return `wss://production-sfo.browserless.io?token=${token}`;
+  return null;
+}
+
 async function launchBrowser(): Promise<Browser> {
   const puppeteer = await import("puppeteer-core");
-  const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  const ws = browserWsEndpoint();
+  if (ws) {
+    return puppeteer.default.connect({ browserWSEndpoint: ws });
+  }
 
+  const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
   if (isServerless) {
-    const chromiumMod = await import("@sparticuz/chromium");
-    const chromium = chromiumMod.default ?? chromiumMod;
-    // На Vercel bin из npm часто не трейсится — качаем pack в /tmp
-    const packUrl =
-      process.env.CHROMIUM_PACK_URL ||
-      "https://github.com/Sparticuz/chromium/releases/download/v149.0.0/chromium-v149.0.0-pack.x64.tar";
-    const executablePath = await chromium.executablePath(packUrl);
-    const args = Array.isArray(chromium.args) ? chromium.args : await chromium.args;
-    return puppeteer.default.launch({
-      args,
-      defaultViewport: { width: 1440, height: 900 },
-      executablePath,
-      headless: true,
-    });
+    // Локальный Chromium-pack на Hobby часто висит на скачивании 66MB.
+    // Без BROWSERLESS_TOKEN / BROWSER_WS_ENDPOINT — сразу явная ошибка.
+    if (process.env.ALLOW_VERCEL_CHROMIUM === "1") {
+      const chromiumMod = await import("@sparticuz/chromium");
+      const chromium = chromiumMod.default ?? chromiumMod;
+      const packUrl =
+        process.env.CHROMIUM_PACK_URL ||
+        "https://github.com/Sparticuz/chromium/releases/download/v149.0.0/chromium-v149.0.0-pack.x64.tar";
+      const executablePath = await chromium.executablePath(packUrl);
+      const args = Array.isArray(chromium.args) ? chromium.args : await chromium.args;
+      return puppeteer.default.launch({
+        args,
+        defaultViewport: { width: 1440, height: 900 },
+        executablePath,
+        headless: true,
+      });
+    }
+    throw new Error(
+      "no_browser: задай BROWSERLESS_TOKEN (или BROWSER_WS_ENDPOINT) в Vercel env — Chromium на Hobby зависает",
+    );
   }
 
   return puppeteer.default.launch({
@@ -169,39 +187,38 @@ async function launchBrowser(): Promise<Browser> {
   });
 }
 
-async function waitFlights(page: Page, timeoutMs = 35000) {
-  await sleep(1500);
+async function waitFlights(page: Page, timeoutMs = 12_000) {
+  await sleep(800);
   const deadline = Date.now() + timeoutMs;
   let last: any = { ok: false };
   while (Date.now() < deadline) {
     last = await page.evaluate(EXTRACT_FLIGHTS_JS);
     if (last?.ok && last.loading === "fetchFinished") return last;
-    // Hobby: не ждём вечно — если прямые 12н уже есть, забираем
     if (last?.ok && (last.direct12n || 0) > 0) return last;
-    if (last?.ok && (last.totalFlights || 0) > 0 && Date.now() + 8000 > deadline) return last;
-    await sleep(1000);
+    await sleep(700);
   }
   return last;
 }
 
-export async function enrichPackage(
+async function enrichPackageInner(
   packageId: number,
   meta?: { operator?: string; room?: string; meal?: string },
 ) {
   const url = `https://level.travel/packages/${packageId}`;
-  const browser = await launchBrowser();
+  let browser: Browser | null = null;
+  const connectedRemote = !!browserWsEndpoint();
   try {
+    browser = await launchBrowser();
     const page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0");
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    const last = await waitFlights(page);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 18_000 });
+    const last = await waitFlights(page, 12_000);
     await page.close();
 
     if (!last?.ok) {
       return { ok: false as const, error: last?.error || "no_flights", url, packageId };
     }
 
-    // ещё раз на сервере: только 12 ночей в отеле
     const offers: FlightOffer[] = (last.best || [])
       .filter((row: any) => Number(row.hotelNights) === 12)
       .map((row: any) => {
@@ -223,7 +240,7 @@ export async function enrichPackage(
     if (!offers.length) {
       return {
         ok: false as const,
-        error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0}, pkgNights=${last.packageHotelNights})`,
+        error: `no_direct_12_hotel_nights (flights=${last.totalFlights || 0})`,
         url,
         packageId,
       };
@@ -238,6 +255,34 @@ export async function enrichPackage(
       offers,
     };
   } finally {
-    await browser.close();
+    if (browser) {
+      try {
+        if (connectedRemote) await browser.disconnect();
+        else await browser.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+export async function enrichPackage(
+  packageId: number,
+  meta?: { operator?: string; room?: string; meal?: string },
+) {
+  const url = `https://level.travel/packages/${packageId}`;
+  try {
+    return await Promise.race([
+      enrichPackageInner(packageId, meta),
+      sleep(ENRICH_BUDGET_MS).then(() => ({
+        ok: false as const,
+        error: `timeout_${ENRICH_BUDGET_MS / 1000}s`,
+        url,
+        packageId,
+      })),
+    ]);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false as const, error: msg, url, packageId };
   }
 }

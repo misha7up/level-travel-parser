@@ -102,13 +102,15 @@ export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-09-28");
   const [topN, setTopN] = useState(10);
-  const enrichTop = 8; // оптимально для Hobby: хватает топа, без лишней нагрузки
+  const enrichTop = 5; // меньше пакетов — меньше шанс упереться в лимиты браузера
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
   const [offers, setOffers] = useState<FlightOffer[]>([]);
   const [phase, setPhase] = useState<"idle" | "packages" | "flights" | "done">("idle");
   const [statusMsg, setStatusMsg] = useState("");
+  const [etaSec, setEtaSec] = useState<number | null>(null);
+  const [progress, setProgress] = useState({ dayIdx: 0, days: 0, flightIdx: 0, flights: 0 });
   const [offerSort, setOfferSort] = useState<{ key: SortKey; dir: SortDir }>({
     key: "price",
     dir: "asc",
@@ -176,18 +178,53 @@ export default function Home() {
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  function fmtEta(sec: number | null) {
+    if (sec == null || sec < 0) return "";
+    if (sec < 60) return `≈ ${Math.max(5, Math.round(sec))} сек`;
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return s > 0 ? `≈ ${m} мин ${s} сек` : `≈ ${m} мин`;
+  }
+
+  /** Грубая оценка: ~9с на день пакетов, ~22с на пакет с рейсами. */
+  function estimateEta(opts: {
+    phase: "packages" | "flights";
+    dayIdx: number;
+    days: number;
+    flightIdx: number;
+    flights: number;
+  }) {
+    const SEC_DAY = 9;
+    const SEC_FLIGHT = 22;
+    if (opts.phase === "packages") {
+      const daysLeft = Math.max(0, opts.days - opts.dayIdx);
+      return daysLeft * SEC_DAY + opts.flights * SEC_FLIGHT;
+    }
+    const flightsLeft = Math.max(0, opts.flights - opts.flightIdx);
+    return flightsLeft * SEC_FLIGHT;
+  }
+
+  function fetchWithTimeout(url: string, ms: number) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+  }
+
   /** Hobby: ждём Level в браузере; сервер только короткие вызовы. */
   async function fetchDayPackages(day: string, perDay = 3): Promise<PackageRow[]> {
     setStatusMsg(`Загружаю ${fmtDateRu(day)}…`);
-    const enqRes = await fetch(`/api/lt/enqueue?date=${day}`);
+    const enqRes = await fetchWithTimeout(`/api/lt/enqueue?date=${day}`, 12_000);
     const enq = await enqRes.json();
     if (!enqRes.ok) throw new Error(enq.error || `enqueue ${enqRes.status}`);
     const requestId = enq.requestId as string;
 
     let done = false;
-    for (let i = 0; i < 45; i++) {
-      setStatusMsg(`Жду ответы туроператоров · ${fmtDateRu(day)}…`);
-      const stRes = await fetch(`/api/lt/status?requestId=${encodeURIComponent(requestId)}`);
+    for (let i = 0; i < 30; i++) {
+      setStatusMsg(`Жду туроператоров · ${fmtDateRu(day)}…`);
+      const stRes = await fetchWithTimeout(
+        `/api/lt/status?requestId=${encodeURIComponent(requestId)}`,
+        10_000,
+      );
       const st = await stRes.json();
       if (!stRes.ok) throw new Error(st.error || `status ${stRes.status}`);
       if (st.done) {
@@ -199,34 +236,32 @@ export default function Home() {
     if (!done) pushLog("  status timeout — забираем офферы как есть…");
 
     setStatusMsg(`Собираю пакеты · ${fmtDateRu(day)}…`);
-    const pkgRes = await fetch(
+    const pkgRes = await fetchWithTimeout(
       `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}`,
+      20_000,
     );
     const pkgData = await pkgRes.json();
     if (!pkgRes.ok) throw new Error(pkgData.error || `packages ${pkgRes.status}`);
     return pkgData.packages || [];
   }
 
-  async function enrichOnce(p: PackageRow, attempt = 1): Promise<{ ok: boolean; data: any }> {
-    setStatusMsg(
-      attempt > 1
-        ? `Повторно смотрю рейсы · ${fmtDateRu(p.departDate)}…`
-        : `Смотрю рейсы · ${fmtDateRu(p.departDate)} · ${p.operator}…`,
-    );
+  async function enrichOnce(p: PackageRow): Promise<{ ok: boolean; data: any }> {
+    setStatusMsg(`Смотрю рейсы · ${fmtDateRu(p.departDate)} · ${p.operator}…`);
     const q = new URLSearchParams({
       packageId: String(p.packageId),
       operator: p.operator || "",
       room: p.room || "",
       meal: p.meal || "",
     });
-    const res = await fetch(`/api/enrich?${q}`);
-    const data = await res.json();
-    if (!data.ok && attempt < 2) {
-      pushLog("  retry enrich (тёплый инстанс)…");
-      await sleep(800);
-      return enrichOnce(p, attempt + 1);
+    try {
+      const res = await fetchWithTimeout(`/api/enrich?${q}`, 25_000);
+      const data = await res.json();
+      return { ok: !!data.ok, data };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const aborted = msg.toLowerCase().includes("abort");
+      return { ok: false, data: { error: aborted ? "timeout_client_25s" : msg } };
     }
-    return { ok: !!data.ok, data };
   }
 
   async function run() {
@@ -238,10 +273,16 @@ export default function Home() {
     setLog([]);
     setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
+    const days = dates.length;
     const all: PackageRow[] = [];
     try {
+      setProgress({ dayIdx: 0, days, flightIdx: 0, flights: enrichTop });
+      setEtaSec(estimateEta({ phase: "packages", dayIdx: 0, days, flightIdx: 0, flights: enrichTop }));
+
       for (let i = 0; i < dates.length; i++) {
         const day = dates[i];
+        setProgress({ dayIdx: i, days, flightIdx: 0, flights: enrichTop });
+        setEtaSec(estimateEta({ phase: "packages", dayIdx: i, days, flightIdx: 0, flights: enrichTop }));
         pushLog(`[${i + 1}/${dates.length}] пакеты ${day}…`);
         try {
           const pkgs = await fetchDayPackages(day, 3);
@@ -257,11 +298,21 @@ export default function Home() {
       const sorted = [...all].sort((a, b) => a.price - b.price);
       const toEnrich = sorted.slice(0, enrichTop);
       setPhase("flights");
-      pushLog(`Рейсы по ${toEnrich.length} пакетам подряд (только 12н в отеле)…`);
+      pushLog(`Рейсы по ${toEnrich.length} пакетам (таймаут 25с, без вечного retry)…`);
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
         const p = toEnrich[i];
+        setProgress({ dayIdx: days, days, flightIdx: i, flights: toEnrich.length });
+        setEtaSec(
+          estimateEta({
+            phase: "flights",
+            dayIdx: days,
+            days,
+            flightIdx: i,
+            flights: toEnrich.length,
+          }),
+        );
         pushLog(`[${i + 1}/${toEnrich.length}] ${p.packageId} ${money(p.price)} ${p.operator}`);
         try {
           const { ok, data } = await enrichOnce(p);
@@ -282,15 +333,24 @@ export default function Home() {
       setOffers(dedupeRank(collected).slice(0, topN));
       setPhase("done");
       setStatusMsg("");
-      pushLog("Готово (в топе только прямые + 12 ночей в отеле).");
+      setEtaSec(null);
+      if (!collected.length) {
+        pushLog(
+          "Рейсы не собрались (нужен BROWSERLESS_TOKEN в Vercel). Ниже — пакеты с 12н в отеле, рейсы выбирай на Level.",
+        );
+      } else {
+        pushLog("Готово (в топе только прямые + 12 ночей в отеле).");
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       pushLog(`Сбой: ${msg}`);
       setPhase("idle");
       setStatusMsg("");
+      setEtaSec(null);
     } finally {
       setRunning(false);
       setStatusMsg("");
+      setEtaSec(null);
     }
   }
 
@@ -304,8 +364,11 @@ export default function Home() {
               aria-hidden
             />
             <p className="text-center text-base text-[#f3f7f4]">{statusMsg || "Загружаю…"}</p>
+            <p className="text-center text-sm text-[#7db89a]">{fmtEta(etaSec)}</p>
             <p className="text-center text-xs text-[#7a9488]">
-              {phase === "packages" ? "Сбор пакетов Level" : "Проверка прямых рейсов"}
+              {phase === "packages"
+                ? `Пакеты: день ${Math.min(progress.dayIdx + 1, progress.days || 1)}/${progress.days || "—"}`
+                : `Рейсы: ${Math.min(progress.flightIdx + 1, progress.flights || 1)}/${progress.flights || "—"}`}
             </p>
           </div>
         </div>
@@ -376,7 +439,9 @@ export default function Home() {
           <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ: прямые + 12 ночей</h2>
           {!offers.length && (
             <p className="text-[#7a9488]">
-              Пока пусто. После обновления здесь появятся лучшие варианты с рейсами.
+              Пока пусто. Если рейсы не подтянулись на Vercel — добавь env{" "}
+              <code className="text-[#9bb5a8]">BROWSERLESS_TOKEN</code> (см. README). Пакеты с 12
+              ночами в отеле всё равно будут в таблице ниже.
             </p>
           )}
           {!!offers.length && (

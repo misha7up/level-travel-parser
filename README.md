@@ -16,18 +16,19 @@ npm run dev
 
 Фильтр: только **12 ночей в отеле** (`datesInfo.nights_count === 12`) + прямые рейсы. «Тур на 12» с 11 ночами в отеле отбрасывается.
 
-## Vercel (Hobby)
+## Vercel (Hobby) — рейсы
 
-Лайфхак: ожидание поиска Level крутится **в браузере** (`/api/lt/enqueue` → poll `/status` → `/packages`), а не в одной длинной serverless-функции.
+Chromium-pack на Hobby **зависает** (скачивание ~66MB). Варианты:
 
-Рейсы: `/api/enrich` по одному пакету подряд (Fluid греет Chromium на повторных вызовах), retry ×1, выход как только есть direct+12н.
+1. **Рекомендуется:** бесплатный [Browserless](https://www.browserless.io/) → в Vercel Env:
+   - `BROWSERLESS_TOKEN=...`
+   - или `BROWSER_WS_ENDPOINT=wss://...`
+2. Локально: `npm run dev` + Chrome — рейсы работают без токена.
+3. `ALLOW_VERCEL_CHROMIUM=1` — снова включить pack (не советую на Hobby).
 
-На Hobby с Fluid `maxDuration` до **300 с** — нам хватает 60 с на enrich. В Project Settings включи Fluid Compute, если выключен.
+Пакеты Level собираются без браузера. Enrich: таймаут 22с на сервере + 25с на клиенте, без вечного retry.
 
-```bash
-# после деплоя жми Обновить; первый enrich холодный и может skip — второй обычно ок
-```
-
+Оценка на блюре: ~9с/день пакетов + ~22с/пакет рейсов.
 ## API
 
 - `GET /api/lt/enqueue?date=2026-09-22`
