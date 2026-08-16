@@ -560,20 +560,7 @@ export default function Home() {
         <section className="mt-8">
           <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ: прямые + 12 ночей</h2>
           {!offers.length && (
-            <div className="space-y-2 text-[#7a9488]">
-              <p>
-                Пока пусто. Пакеты ниже есть — рейсы подтягивает Chromium на сервере (не Browserless).
-              </p>
-              {!!enrichErrors.length && (
-                <pre className="overflow-auto rounded-lg border border-[#243a32] bg-[#0a0f0d] p-3 text-xs text-[#c9a27a]">
-                  {enrichErrors.join("\n")}
-                </pre>
-              )}
-              <p className="text-xs">
-                На сервере: <code className="text-[#9bb5a8]">journalctl -u rixos-web -n 40</code> и{" "}
-                <code className="text-[#9bb5a8]">which chromium-browser</code>
-              </p>
-            </div>
+            <p className="text-[#7a9488]">Пока пусто.</p>
           )}
           {!!offers.length && (
             <div className="overflow-x-auto rounded-xl border border-[#243a32]">
