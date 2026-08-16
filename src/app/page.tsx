@@ -108,6 +108,7 @@ export default function Home() {
   const [packages, setPackages] = useState<PackageRow[]>([]);
   const [offers, setOffers] = useState<FlightOffer[]>([]);
   const [phase, setPhase] = useState<"idle" | "packages" | "flights" | "done">("idle");
+  const [statusMsg, setStatusMsg] = useState("");
   const [offerSort, setOfferSort] = useState<{ key: SortKey; dir: SortDir }>({
     key: "price",
     dir: "asc",
@@ -177,6 +178,7 @@ export default function Home() {
 
   /** Hobby: ждём Level в браузере; сервер только короткие вызовы. */
   async function fetchDayPackages(day: string, perDay = 3): Promise<PackageRow[]> {
+    setStatusMsg(`Загружаю ${fmtDateRu(day)}…`);
     const enqRes = await fetch(`/api/lt/enqueue?date=${day}`);
     const enq = await enqRes.json();
     if (!enqRes.ok) throw new Error(enq.error || `enqueue ${enqRes.status}`);
@@ -184,6 +186,7 @@ export default function Home() {
 
     let done = false;
     for (let i = 0; i < 45; i++) {
+      setStatusMsg(`Жду ответы туроператоров · ${fmtDateRu(day)}…`);
       const stRes = await fetch(`/api/lt/status?requestId=${encodeURIComponent(requestId)}`);
       const st = await stRes.json();
       if (!stRes.ok) throw new Error(st.error || `status ${stRes.status}`);
@@ -195,6 +198,7 @@ export default function Home() {
     }
     if (!done) pushLog("  status timeout — забираем офферы как есть…");
 
+    setStatusMsg(`Собираю пакеты · ${fmtDateRu(day)}…`);
     const pkgRes = await fetch(
       `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}`,
     );
@@ -204,6 +208,11 @@ export default function Home() {
   }
 
   async function enrichOnce(p: PackageRow, attempt = 1): Promise<{ ok: boolean; data: any }> {
+    setStatusMsg(
+      attempt > 1
+        ? `Повторно смотрю рейсы · ${fmtDateRu(p.departDate)}…`
+        : `Смотрю рейсы · ${fmtDateRu(p.departDate)} · ${p.operator}…`,
+    );
     const q = new URLSearchParams({
       packageId: String(p.packageId),
       operator: p.operator || "",
@@ -227,6 +236,7 @@ export default function Home() {
     setPackages([]);
     setOffers([]);
     setLog([]);
+    setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
     const all: PackageRow[] = [];
     try {
@@ -247,9 +257,7 @@ export default function Home() {
       const sorted = [...all].sort((a, b) => a.price - b.price);
       const toEnrich = sorted.slice(0, enrichTop);
       setPhase("flights");
-      pushLog(
-        `Рейсы по ${toEnrich.length} пакетам подряд (Fluid греет Chromium; только 12н в отеле)…`,
-      );
+      pushLog(`Рейсы по ${toEnrich.length} пакетам подряд (только 12н в отеле)…`);
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
@@ -273,19 +281,37 @@ export default function Home() {
       }
       setOffers(dedupeRank(collected).slice(0, topN));
       setPhase("done");
+      setStatusMsg("");
       pushLog("Готово (в топе только прямые + 12 ночей в отеле).");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       pushLog(`Сбой: ${msg}`);
       setPhase("idle");
+      setStatusMsg("");
     } finally {
       setRunning(false);
+      setStatusMsg("");
     }
   }
 
   return (
-    <main className="min-h-screen bg-[#0c1210] text-[#e8efe9]">
-      <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
+    <main className="relative min-h-screen bg-[#0c1210] text-[#e8efe9]">
+      {running && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0c1210]/55 backdrop-blur-md">
+          <div className="mx-4 flex max-w-md flex-col items-center gap-4 rounded-2xl border border-[#2a453b] bg-[#111a17]/95 px-8 py-7 shadow-2xl">
+            <div
+              className="h-10 w-10 animate-spin rounded-full border-2 border-[#2f9e6d] border-t-transparent"
+              aria-hidden
+            />
+            <p className="text-center text-base text-[#f3f7f4]">{statusMsg || "Загружаю…"}</p>
+            <p className="text-center text-xs text-[#7a9488]">
+              {phase === "packages" ? "Сбор пакетов Level" : "Проверка прямых рейсов"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className={`mx-auto max-w-5xl px-4 py-10 sm:px-6 ${running ? "pointer-events-none select-none" : ""}`}>
         <header className="mb-8 border-b border-[#1e332c] pb-6">
           <p className="text-sm tracking-[0.2em] text-[#7db89a] uppercase">Level.Travel</p>
           <h1 className="mt-2 font-serif text-3xl sm:text-4xl text-[#f3f7f4]">
@@ -295,8 +321,6 @@ export default function Home() {
             12 ночей в отеле · только прямые рейсы · Москва.
             <br />
             Нажми «Обновить» — соберёт все даты диапазона.
-            <br />
-            В топе приоритет: ранний вылет из Москвы (до 08:00) и поздний из Египта (после 18:00).
           </p>
         </header>
 

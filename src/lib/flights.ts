@@ -146,16 +146,22 @@ async function launchBrowser(): Promise<Browser> {
   const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 
   if (isServerless) {
-    const chromium = await import("@sparticuz/chromium");
+    const chromiumMod = await import("@sparticuz/chromium");
+    const chromium = chromiumMod.default ?? chromiumMod;
+    // На Vercel bin из npm часто не трейсится — качаем pack в /tmp
+    const packUrl =
+      process.env.CHROMIUM_PACK_URL ||
+      "https://github.com/Sparticuz/chromium/releases/download/v149.0.0/chromium-v149.0.0-pack.x64.tar";
+    const executablePath = await chromium.executablePath(packUrl);
+    const args = Array.isArray(chromium.args) ? chromium.args : await chromium.args;
     return puppeteer.default.launch({
-      args: chromium.default.args,
+      args,
       defaultViewport: { width: 1440, height: 900 },
-      executablePath: await chromium.default.executablePath(),
+      executablePath,
       headless: true,
     });
   }
 
-  // Local: system Chrome
   return puppeteer.default.launch({
     channel: "chrome",
     headless: true,
