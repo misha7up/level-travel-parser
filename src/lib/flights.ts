@@ -314,7 +314,8 @@ async function blockHeavyAssets(page: Page) {
   await page.setRequestInterception(true);
   page.on("request", (req) => {
     const t = req.resourceType();
-    if (t === "image" || t === "media" || t === "font" || t === "stylesheet") {
+    // CSS не режем — иначе вёрстка/часть UI кэшбека может не дойти
+    if (t === "image" || t === "media" || t === "font") {
       req.abort().catch(() => {});
     } else {
       req.continue().catch(() => {});

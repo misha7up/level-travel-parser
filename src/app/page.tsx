@@ -135,16 +135,17 @@ function prefScore(o: FlightOffer) {
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-10-07"); // 20 дней вылета с 18.09
-  const [topN, setTopN] = useState(20);
+  const [topN, setTopN] = useState(25);
   /** На VPS 1GB: широкий охват дней, но лимит enrich (Chromium тяжёлый). */
   const PACKAGES_PER_DAY_SCAN = 5;
-  const DAY_COVER = 12; // дешёвый пакет с каждого из N самых дешёвых дней
-  const EXTRA_PACKAGES = 6; // плюс ещё самые дешёвые пакеты по диапазону
+  const DAY_COVER = 18; // дешёвый пакет с каждого из N самых дешёвых дней
+  const EXTRA_PACKAGES = 7; // итого до 25 пакетов на рейсы
   const PACKAGE_SCAN_CONCURRENCY = 2;
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
   const [offers, setOffers] = useState<FlightOffer[]>([]);
+  const [enrichErrors, setEnrichErrors] = useState<string[]>([]);
   const [phase, setPhase] = useState<"idle" | "packages" | "flights" | "done">("idle");
   const [statusMsg, setStatusMsg] = useState("");
   const [etaSec, setEtaSec] = useState<number | null>(null);
@@ -357,6 +358,7 @@ export default function Home() {
     setPhase("packages");
     setPackages([]);
     setOffers([]);
+    setEnrichErrors([]);
     setLog([]);
     setStatusMsg("Стартую поиск…");
     setOfferSort({ key: "price", dir: "asc" });
@@ -409,6 +411,7 @@ export default function Home() {
       setStatusMsg(`Рейсы · туда до 09:00, обратно после 17:00…`);
 
       const collected: FlightOffer[] = [];
+      const errors: string[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
         const p = toEnrich[i];
         setProgress({ dayIdx: days, days, flightIdx: i, flights: toEnrich.length });
@@ -425,7 +428,9 @@ export default function Home() {
         try {
           const { ok, data } = await enrichOnce(p);
           if (!ok) {
-            pushLog(`  skip: ${data.error || "no flights"}`);
+            const err = String(data.error || "no flights");
+            pushLog(`  skip: ${err}`);
+            if (errors.length < 5) errors.push(`${p.packageId}: ${err}`);
             continue;
           }
           const filtered = (data.offers || []).filter(
@@ -438,20 +443,25 @@ export default function Home() {
           pushLog(
             `  flights=${data.totalFlights} match=${filtered.length} cashback=${withCb}/${filtered.length}`,
           );
+          if (!filtered.length && errors.length < 5) {
+            errors.push(`${p.packageId}: нет прямых 12н + слот <09:00/≥17:00`);
+          }
           collected.push(...filtered);
           setOffers(dedupeRank(collected).slice(0, topN));
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           pushLog(`  skip: ${msg}`);
+          if (errors.length < 5) errors.push(`${p.packageId}: ${msg}`);
         }
       }
       setOffers(dedupeRank(collected).slice(0, topN));
+      setEnrichErrors(errors);
       setPhase("done");
       setStatusMsg("");
       setEtaSec(null);
       if (!collected.length) {
         pushLog(
-          "Подходящих рейсов нет (нужен Chromium на сервере или нет слотов до 09:00 / после 17:00).",
+          "Подходящих рейсов нет — проверь Chromium на сервере (`journalctl -u rixos-web`) или слоты времени.",
         );
       } else {
         pushLog("Готово.");
@@ -498,12 +508,9 @@ export default function Home() {
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
             12 ночей в отеле · только прямые рейсы · Москва.
             <br />
-            Сначала пакеты по всем дням, потом рейсы по ~18 самым выгодным пакетам
-            (дешёвые дни + доп. дешёвые офферы).
-            <br />
             Вылет туда только до 09:00 · обратно только после 17:00.
             <br />
-            Нажми «Обновить».
+            Нажмите «Обновить».
           </p>
         </header>
 
@@ -536,7 +543,7 @@ export default function Home() {
               onChange={(e) => setTopN(Number(e.target.value) || 20)}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
-            <span className="text-xs text-[#6a8578]">по умолчанию 20</span>
+            <span className="text-xs text-[#6a8578]">по умолчанию 25</span>
           </label>
           <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 pt-1">
             <button
@@ -553,11 +560,20 @@ export default function Home() {
         <section className="mt-8">
           <h2 className="mb-3 text-lg text-[#cfe3d8]">Топ: прямые + 12 ночей</h2>
           {!offers.length && (
-            <p className="text-[#7a9488]">
-              Пока пусто. Если рейсы не подтянулись на Vercel — добавь env{" "}
-              <code className="text-[#9bb5a8]">BROWSERLESS_TOKEN</code> (см. README). Пакеты с 12
-              ночами в отеле всё равно будут в таблице ниже.
-            </p>
+            <div className="space-y-2 text-[#7a9488]">
+              <p>
+                Пока пусто. Пакеты ниже есть — рейсы подтягивает Chromium на сервере (не Browserless).
+              </p>
+              {!!enrichErrors.length && (
+                <pre className="overflow-auto rounded-lg border border-[#243a32] bg-[#0a0f0d] p-3 text-xs text-[#c9a27a]">
+                  {enrichErrors.join("\n")}
+                </pre>
+              )}
+              <p className="text-xs">
+                На сервере: <code className="text-[#9bb5a8]">journalctl -u rixos-web -n 40</code> и{" "}
+                <code className="text-[#9bb5a8]">which chromium-browser</code>
+              </p>
+            </div>
           )}
           {!!offers.length && (
             <div className="overflow-x-auto rounded-xl border border-[#243a32]">
@@ -662,7 +678,7 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {sortedPackages.slice(0, 40).map((p) => (
+                {sortedPackages.slice(0, topN).map((p) => (
                   <tr key={p.packageId} className="border-t border-[#1e332c]">
                     <td className="px-3 py-2 whitespace-nowrap font-medium text-[#6ecf9c]">
                       {money(p.price)}
