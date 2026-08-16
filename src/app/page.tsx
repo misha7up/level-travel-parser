@@ -100,9 +100,9 @@ function dateKey(isoOrDate: string) {
 
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
-  const [dateTo, setDateTo] = useState("2026-10-10");
+  const [dateTo, setDateTo] = useState("2026-09-28");
   const [topN, setTopN] = useState(10);
-  const [enrichTop, setEnrichTop] = useState(8);
+  const enrichTop = 8; // оптимально для Hobby: хватает топа, без лишней нагрузки
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
@@ -294,12 +294,13 @@ export default function Home() {
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
             12 ночей в отеле · только прямые рейсы · Москва.
             <br />
-            Нажми «Обновить» — соберёт все даты диапазона. В топе приоритет: ранний вылет из Москвы
-            (до 08:00) и поздний из Египта (после 18:00).
+            Нажми «Обновить» — соберёт все даты диапазона.
+            <br />
+            В топе приоритет: ранний вылет из Москвы (до 08:00) и поздний из Египта (после 18:00).
           </p>
         </header>
 
-        <section className="grid gap-4 rounded-2xl border border-[#243a32] bg-[#111a17] p-4 sm:grid-cols-2 lg:grid-cols-4 sm:p-5">
+        <section className="grid gap-4 rounded-2xl border border-[#243a32] bg-[#111a17] p-4 sm:grid-cols-2 lg:grid-cols-3 sm:p-5">
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-[#7db89a]">Вылет с</span>
             <input
@@ -330,21 +331,7 @@ export default function Home() {
             />
             <span className="text-xs text-[#6a8578]">например 10 — топ‑10 в таблице</span>
           </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-[#7db89a]">Сколько дешёвых пакетов проверить на рейсы</span>
-            <input
-              type="number"
-              min={3}
-              max={25}
-              value={enrichTop}
-              onChange={(e) => setEnrichTop(Number(e.target.value) || 12)}
-              className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
-            />
-            <span className="text-xs text-[#6a8578]">
-              по умолчанию 8 — меньше нагрузка на Hobby; больше = дольше
-            </span>
-          </label>
-          <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-1">
+          <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 pt-1">
             <button
               type="button"
               disabled={running || !dates.length}
