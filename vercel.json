@@ -1,12 +1,16 @@
 {
   "functions": {
+    "src/app/api/lt/*/route.ts": {
+      "maxDuration": 30,
+      "memory": 512
+    },
     "src/app/api/day/route.ts": {
       "maxDuration": 60,
-      "memory": 1024
+      "memory": 512
     },
     "src/app/api/enrich/route.ts": {
       "maxDuration": 60,
-      "memory": 1600
+      "memory": 1024
     }
   }
 }

@@ -16,15 +16,22 @@ npm run dev
 
 Фильтр: только **12 ночей в отеле** (`datesInfo.nights_count === 12`) + прямые рейсы. «Тур на 12» с 11 ночами в отеле отбрасывается.
 
-## Vercel
+## Vercel (Hobby)
 
-1. Framework: Next.js.
-2. Нужен план с `maxDuration` ≥ 60 с (Pro) — поиск дня и Chromium для рейсов долгие.
-3. Рейсы: `puppeteer-core` + `@sparticuz/chromium` (не Playwright — на Vercel у него нет browsers.json).
+Лайфхак: ожидание поиска Level крутится **в браузере** (`/api/lt/enqueue` → poll `/status` → `/packages`), а не в одной длинной serverless-функции.
 
-Hobby (10s) для enrich обычно не хватает — пакеты соберутся, рейсы упадут по таймауту.
+Рейсы: `/api/enrich` по одному пакету подряд (Fluid греет Chromium на повторных вызовах), retry ×1, выход как только есть direct+12н.
+
+На Hobby с Fluid `maxDuration` до **300 с** — нам хватает 60 с на enrich. В Project Settings включи Fluid Compute, если выключен.
+
+```bash
+# после деплоя жми Обновить; первый enrich холодный и может skip — второй обычно ок
+```
 
 ## API
 
-- `GET /api/day?date=2026-09-22&perDay=3` — пакеты Blue Planet / 12н
-- `GET /api/enrich?packageId=404272259` — прямые рейсы со страницы пакета
+- `GET /api/lt/enqueue?date=2026-09-22`
+- `GET /api/lt/status?requestId=...`
+- `GET /api/lt/packages?requestId=...&date=...&perDay=3`
+- `GET /api/enrich?packageId=404272259` — прямые + строго 12 ночей в отеле
+- `GET /api/day?...` — старый монолит (можно не использовать)

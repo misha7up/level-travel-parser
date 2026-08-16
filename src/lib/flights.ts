@@ -163,16 +163,17 @@ async function launchBrowser(): Promise<Browser> {
   });
 }
 
-async function waitFlights(page: Page) {
-  await sleep(2000);
-  const deadline = Date.now() + 90000;
+async function waitFlights(page: Page, timeoutMs = 35000) {
+  await sleep(1500);
+  const deadline = Date.now() + timeoutMs;
   let last: any = { ok: false };
   while (Date.now() < deadline) {
     last = await page.evaluate(EXTRACT_FLIGHTS_JS);
-    if (last?.ok && (last.loading === "fetchFinished" || (last.totalFlights || 0) > 0)) {
-      return last;
-    }
-    await sleep(1500);
+    if (last?.ok && last.loading === "fetchFinished") return last;
+    // Hobby: не ждём вечно — если прямые 12н уже есть, забираем
+    if (last?.ok && (last.direct12n || 0) > 0) return last;
+    if (last?.ok && (last.totalFlights || 0) > 0 && Date.now() + 8000 > deadline) return last;
+    await sleep(1000);
   }
   return last;
 }

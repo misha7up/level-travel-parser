@@ -102,7 +102,7 @@ export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-10-10");
   const [topN, setTopN] = useState(10);
-  const [enrichTop, setEnrichTop] = useState(12);
+  const [enrichTop, setEnrichTop] = useState(8);
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
@@ -171,6 +171,55 @@ export default function Home() {
     return current.dir === "asc" ? " ↑" : " ↓";
   }
 
+  function sleep(ms: number) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /** Hobby: ждём Level в браузере; сервер только короткие вызовы. */
+  async function fetchDayPackages(day: string, perDay = 3): Promise<PackageRow[]> {
+    const enqRes = await fetch(`/api/lt/enqueue?date=${day}`);
+    const enq = await enqRes.json();
+    if (!enqRes.ok) throw new Error(enq.error || `enqueue ${enqRes.status}`);
+    const requestId = enq.requestId as string;
+
+    let done = false;
+    for (let i = 0; i < 45; i++) {
+      const stRes = await fetch(`/api/lt/status?requestId=${encodeURIComponent(requestId)}`);
+      const st = await stRes.json();
+      if (!stRes.ok) throw new Error(st.error || `status ${stRes.status}`);
+      if (st.done) {
+        done = true;
+        break;
+      }
+      await sleep(1200);
+    }
+    if (!done) pushLog("  status timeout — забираем офферы как есть…");
+
+    const pkgRes = await fetch(
+      `/api/lt/packages?requestId=${encodeURIComponent(requestId)}&date=${day}&perDay=${perDay}`,
+    );
+    const pkgData = await pkgRes.json();
+    if (!pkgRes.ok) throw new Error(pkgData.error || `packages ${pkgRes.status}`);
+    return pkgData.packages || [];
+  }
+
+  async function enrichOnce(p: PackageRow, attempt = 1): Promise<{ ok: boolean; data: any }> {
+    const q = new URLSearchParams({
+      packageId: String(p.packageId),
+      operator: p.operator || "",
+      room: p.room || "",
+      meal: p.meal || "",
+    });
+    const res = await fetch(`/api/enrich?${q}`);
+    const data = await res.json();
+    if (!data.ok && attempt < 2) {
+      pushLog("  retry enrich (тёплый инстанс)…");
+      await sleep(800);
+      return enrichOnce(p, attempt + 1);
+    }
+    return { ok: !!data.ok, data };
+  }
+
   async function run() {
     if (running) return;
     setRunning(true);
@@ -184,42 +233,43 @@ export default function Home() {
       for (let i = 0; i < dates.length; i++) {
         const day = dates[i];
         pushLog(`[${i + 1}/${dates.length}] пакеты ${day}…`);
-        const res = await fetch(`/api/day?date=${day}&perDay=3`);
-        const data = await res.json();
-        if (!res.ok) {
-          pushLog(`  ошибка: ${data.error || res.status}`);
-          continue;
+        try {
+          const pkgs = await fetchDayPackages(day, 3);
+          all.push(...pkgs);
+          setPackages([...all].sort((a, b) => a.price - b.price));
+          pushLog(`  +${pkgs.length} (всего ${all.length})`);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          pushLog(`  ошибка: ${msg}`);
         }
-        const pkgs: PackageRow[] = data.packages || [];
-        all.push(...pkgs);
-        setPackages([...all].sort((a, b) => a.price - b.price));
-        pushLog(`  +${pkgs.length} (всего ${all.length})`);
       }
 
       const sorted = [...all].sort((a, b) => a.price - b.price);
       const toEnrich = sorted.slice(0, enrichTop);
       setPhase("flights");
-      pushLog(`Рейсы (прямые + 12 ночей, приоритет рано/поздно) по топ-${toEnrich.length}…`);
+      pushLog(
+        `Рейсы по ${toEnrich.length} пакетам подряд (Fluid греет Chromium; только 12н в отеле)…`,
+      );
 
       const collected: FlightOffer[] = [];
       for (let i = 0; i < toEnrich.length; i++) {
         const p = toEnrich[i];
         pushLog(`[${i + 1}/${toEnrich.length}] ${p.packageId} ${money(p.price)} ${p.operator}`);
-        const q = new URLSearchParams({
-          packageId: String(p.packageId),
-          operator: p.operator || "",
-          room: p.room || "",
-          meal: p.meal || "",
-        });
-        const res = await fetch(`/api/enrich?${q}`);
-        const data = await res.json();
-        if (!data.ok) {
-          pushLog(`  skip: ${data.error || "no flights"}`);
-          continue;
+        try {
+          const { ok, data } = await enrichOnce(p);
+          if (!ok) {
+            pushLog(`  skip: ${data.error || "no flights"}`);
+            continue;
+          }
+          pushLog(`  flights=${data.totalFlights} direct12=${data.direct12n}`);
+          collected.push(
+            ...(data.offers || []).filter((o: FlightOffer) => Number(o.hotelNights) === 12),
+          );
+          setOffers(dedupeRank(collected).slice(0, topN));
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          pushLog(`  skip: ${msg}`);
         }
-        pushLog(`  flights=${data.totalFlights} direct12=${data.direct12n}`);
-        collected.push(...(data.offers || []).filter((o: FlightOffer) => Number(o.hotelNights) === 12));
-        setOffers(dedupeRank(collected).slice(0, topN));
       }
       setOffers(dedupeRank(collected).slice(0, topN));
       setPhase("done");
@@ -290,7 +340,9 @@ export default function Home() {
               onChange={(e) => setEnrichTop(Number(e.target.value) || 12)}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
-            <span className="text-xs text-[#6a8578]">больше = дольше, но меньше шанс пропустить выгодный рейс</span>
+            <span className="text-xs text-[#6a8578]">
+              по умолчанию 8 — меньше нагрузка на Hobby; больше = дольше
+            </span>
           </label>
           <div className="sm:col-span-2 lg:col-span-4 flex flex-wrap items-center gap-3 pt-1">
             <button

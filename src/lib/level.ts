@@ -122,16 +122,27 @@ export async function ltEnqueue(dayIso: string): Promise<string> {
   return payload.request_id as string;
 }
 
+export async function ltStatusOnce(requestId: string): Promise<{
+  done: boolean;
+  pending: string[];
+  status: Record<string, string>;
+  raw: any;
+}> {
+  const raw = await ltGet("/search/status", { request_id: requestId });
+  const status = (raw?.status || {}) as Record<string, string>;
+  const pending = Object.entries(status)
+    .filter(([, v]) => ["pending", "in_progress", "queued"].includes(String(v)))
+    .map(([k]) => k);
+  return { done: pending.length === 0, pending, status, raw };
+}
+
 export async function ltWaitStatus(requestId: string, timeoutMs = 35000): Promise<any> {
   const t0 = Date.now();
   let last: any = {};
   while (Date.now() - t0 < timeoutMs) {
-    last = await ltGet("/search/status", { request_id: requestId });
-    const status = last.status || {};
-    const pending = Object.entries(status).filter(([, v]) =>
-      ["pending", "in_progress", "queued"].includes(String(v)),
-    );
-    if (!pending.length) return last;
+    const once = await ltStatusOnce(requestId);
+    last = once.raw;
+    if (once.done) return last;
     await sleep(1200);
   }
   return last;
@@ -184,11 +195,15 @@ export type PackageRow = {
   url: string;
 };
 
-export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[]> {
-  const rid = await ltEnqueue(dayIso);
-  const ops = ltOkOperators(await ltWaitStatus(rid));
+export async function packagesFromRequest(
+  requestId: string,
+  dayIso: string,
+  perDay = 3,
+  statusPayload?: any,
+): Promise<PackageRow[]> {
+  const ops = ltOkOperators(statusPayload || (await ltStatusOnce(requestId)).raw);
   const offersPayload = await ltGet("/search/get_hotel_offers", {
-    request_id: rid,
+    request_id: requestId,
     hotel_id: String(LT_HOTEL_ID),
     operator_ids: ops.join(","),
   });
@@ -196,10 +211,9 @@ export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[
   const picked = pickOffers(offers, perDay);
   const packages: PackageRow[] = [];
   for (const o of picked) {
-    const go = await ltGet("/search/get_offer", { request_id: rid, tour_id: o.id });
+    const go = await ltGet("/search/get_offer", { request_id: requestId, tour_id: o.id });
     const pkg = go.package || {};
     if (!pkg.id) continue;
-    // строго ночи в отеле (dates_info.nights_count), не «тур на 12»
     const nights = Number(pkg.dates_info?.nights_count ?? o.nights_count ?? 0);
     if (nights !== 12) continue;
     packages.push({
@@ -217,4 +231,10 @@ export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[
     });
   }
   return packages;
+}
+
+export async function searchDay(dayIso: string, perDay = 3): Promise<PackageRow[]> {
+  const rid = await ltEnqueue(dayIso);
+  const status = await ltWaitStatus(rid);
+  return packagesFromRequest(rid, dayIso, perDay, status);
 }
