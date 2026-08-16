@@ -202,17 +202,32 @@ function resolveChromePath(): string {
           "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
         ]
       : [
-          "/usr/bin/chromium-browser",
+          // Ubuntu: /usr/bin/chromium-browser часто заглушка «install snap» — сначала snap/реальный бинарь
+          "/snap/bin/chromium",
           "/usr/bin/chromium",
           "/usr/bin/google-chrome-stable",
           "/usr/bin/google-chrome",
-          "/snap/bin/chromium",
+          "/usr/bin/chromium-browser",
         ];
   for (const p of candidates) {
-    if (existsSync(p)) return p;
+    if (!existsSync(p)) continue;
+    // отсечь apt-заглушку, которая только печатает «snap install chromium»
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { readFileSync } = require("fs") as typeof import("fs");
+      if (p.endsWith("chromium-browser")) {
+        const head = readFileSync(p, "utf8").slice(0, 200);
+        if (head.includes("snap install chromium") || head.includes("requires the chromium snap")) {
+          continue;
+        }
+      }
+    } catch {
+      /* binary — ок */
+    }
+    return p;
   }
   throw new Error(
-    "no_chrome: поставь Chromium (`sudo apt install -y chromium-browser`) или задай CHROME_PATH",
+    "no_chrome: sudo snap install chromium  (или задай CHROME_PATH=/snap/bin/chromium)",
   );
 }
 

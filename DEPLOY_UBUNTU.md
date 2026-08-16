@@ -18,12 +18,9 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Chromium для Puppeteer (без Browserless)
-sudo apt install -y chromium-browser
-# если пакета нет (Ubuntu 24 snap-only) — так:
-# sudo snap install chromium
-# или: sudo apt install -y chromium
-
-which chromium-browser || which chromium || which google-chrome-stable
+# На Ubuntu 22/24 apt-пакет часто заглушка — ставь snap:
+sudo snap install chromium
+# путь: /snap/bin/chromium  (пропиши CHROME_PATH в systemd, см. deploy/rixos-web.service)
 ```
 
 Запомни путь из `which` — при необходимости положи в env как `CHROME_PATH`.
