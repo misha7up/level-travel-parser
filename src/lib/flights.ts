@@ -215,7 +215,7 @@ async function enrichPackageInner(
   packageId: number,
   meta?: { operator?: string; room?: string; meal?: string },
 ) {
-  const url = `https://level.travel/packages/${packageId}`;
+  const url = `https://tbank.level.travel/packages/${packageId}`;
   let browser: Browser | null = null;
   const connectedRemote = !!browserWsEndpoint();
   try {
@@ -236,7 +236,7 @@ async function enrichPackageInner(
         const fo: FlightOffer = {
           ...row,
           hotelNights: 12,
-          source: "level.travel",
+          source: "tbank.level.travel",
           operator: last.operator || meta?.operator || "",
           room: last.room || meta?.room || "",
           meal: last.meal || meta?.meal || "",
@@ -281,7 +281,7 @@ export async function enrichPackage(
   packageId: number,
   meta?: { operator?: string; room?: string; meal?: string },
 ) {
-  const url = `https://level.travel/packages/${packageId}`;
+  const url = `https://tbank.level.travel/packages/${packageId}`;
   try {
     return await Promise.race([
       enrichPackageInner(packageId, meta),

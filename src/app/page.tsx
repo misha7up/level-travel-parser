@@ -78,6 +78,16 @@ function money(n: number) {
   return `${Math.round(n).toLocaleString("ru-RU")} ₽`;
 }
 
+const CASHBACK_RATE = 0.05; // Т-Банк на tbank.level.travel
+
+function cashbackOf(price: number) {
+  return Math.round(price * CASHBACK_RATE);
+}
+
+function netOf(price: number) {
+  return price - cashbackOf(price);
+}
+
 function fmtDateRu(iso: string) {
   const raw = (iso || "").slice(0, 10);
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
@@ -122,33 +132,6 @@ function prefScore(o: FlightOffer) {
   return 24 * 60 - outMin(o) + retMin(o);
 }
 
-function fmtDeltaHours(mins: number) {
-  const h = Math.floor(Math.abs(mins) / 60);
-  const m = Math.abs(mins) % 60;
-  if (h && m) return `${h} ч ${m} мин`;
-  if (h) return `${h} ч`;
-  return `${m} мин`;
-}
-
-/** Сравнение с самым дешёвым: сколько доплатить за более ранний туда / поздний обратно. */
-function altNote(o: FlightOffer, cheapest: FlightOffer | null): string {
-  if (!cheapest || o.packageId === cheapest.packageId && o.outboundDep === cheapest.outboundDep && o.returnDep === cheapest.returnDep) {
-    return "мин. цена";
-  }
-  const delta = o.price - cheapest.price;
-  const earlier = outMin(cheapest) - outMin(o);
-  const laterBack = retMin(o) - retMin(cheapest);
-  const parts: string[] = [];
-  if (earlier > 0) parts.push(`вылет раньше на ${fmtDeltaHours(earlier)}`);
-  if (laterBack > 0) parts.push(`обратно позже на ${fmtDeltaHours(laterBack)}`);
-  if (!parts.length) {
-    if (delta <= 0) return "дешевле / тот же слот";
-    return delta > 0 ? `+${money(delta)} без выигрыша по времени` : "";
-  }
-  if (delta <= 0) return parts.join(" · ");
-  return `+${money(delta)} за ${parts.join(" и ")}`;
-}
-
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-10-07"); // 20 дней вылета с 18.09
@@ -174,22 +157,16 @@ export default function Home() {
 
   const dates = useMemo(() => daysBetween(dateFrom, dateTo), [dateFrom, dateTo]);
 
-  const cheapestOffer = useMemo(() => {
-    if (!offers.length) return null;
-    return [...offers].sort((a, b) => a.price - b.price || prefScore(b) - prefScore(a))[0];
-  }, [offers]);
-
   const sortedOffers = useMemo(() => {
     const rows = [...offers];
     rows.sort((a, b) => {
       if (offerSort.key === "date") {
         const da = dateKey(a.checkIn || a.outboundDep);
         const db = dateKey(b.checkIn || b.outboundDep);
-        const cmp = da.localeCompare(db) || a.price - b.price || prefScore(b) - prefScore(a);
+        const cmp = da.localeCompare(db) || netOf(a.price) - netOf(b.price) || prefScore(b) - prefScore(a);
         return offerSort.dir === "asc" ? cmp : -cmp;
       }
-      // цена, при равной — раньше туда / позже обратно
-      const cmp = a.price - b.price || prefScore(b) - prefScore(a);
+      const cmp = netOf(a.price) - netOf(b.price) || prefScore(b) - prefScore(a);
       return offerSort.dir === "asc" ? cmp : -cmp;
     });
     return rows;
@@ -199,10 +176,10 @@ export default function Home() {
     const rows = [...packages];
     rows.sort((a, b) => {
       if (pkgSort.key === "date") {
-        const cmp = a.departDate.localeCompare(b.departDate) || a.price - b.price;
+        const cmp = a.departDate.localeCompare(b.departDate) || netOf(a.price) - netOf(b.price);
         return pkgSort.dir === "asc" ? cmp : -cmp;
       }
-      const cmp = a.price - b.price || a.departDate.localeCompare(b.departDate);
+      const cmp = netOf(a.price) - netOf(b.price) || a.departDate.localeCompare(b.departDate);
       return pkgSort.dir === "asc" ? cmp : -cmp;
     });
     return rows;
@@ -344,7 +321,7 @@ export default function Home() {
         try {
           const pkgs = await fetchDayPackages(day, 3);
           all.push(...pkgs);
-          setPackages([...all].sort((a, b) => a.price - b.price));
+          setPackages([...all].sort((a, b) => netOf(a.price) - netOf(b.price)));
           pushLog(`  +${pkgs.length} (всего ${all.length})`);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -355,23 +332,23 @@ export default function Home() {
       // 2) Топ-3 дня с минимальной ценой пакета (явно дешевле остальных)
       const dayMin = new Map<string, number>();
       for (const p of all) {
+        const net = netOf(p.price);
         const prev = dayMin.get(p.departDate);
-        if (prev == null || p.price < prev) dayMin.set(p.departDate, p.price);
+        if (prev == null || net < prev) dayMin.set(p.departDate, net);
       }
       const rankedDays = [...dayMin.entries()]
         .sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]))
         .slice(0, BEST_DAYS);
       const bestDaySet = new Set(rankedDays.map(([d]) => d));
       pushLog(
-        `Выгодные дни: ${rankedDays.map(([d, pr]) => `${fmtDateRu(d)} (${money(pr)})`).join(", ") || "—"}`,
+        `Выгодные дни (по итогу −5%): ${rankedDays.map(([d, pr]) => `${fmtDateRu(d)} (${money(pr)})`).join(", ") || "—"}`,
       );
 
-      // 3) В этих днях — самые дешёвые пакеты → Browserless за рейсами
       const toEnrich: PackageRow[] = [];
       for (const [day] of rankedDays) {
         const dayPkgs = all
           .filter((p) => p.departDate === day)
-          .sort((a, b) => a.price - b.price)
+          .sort((a, b) => netOf(a.price) - netOf(b.price))
           .slice(0, PACKAGES_PER_BEST_DAY);
         toEnrich.push(...dayPkgs);
       }
@@ -465,14 +442,14 @@ export default function Home() {
 
       <div className={`mx-auto max-w-5xl px-4 py-10 sm:px-6 ${running ? "pointer-events-none select-none" : ""}`}>
         <header className="mb-8 border-b border-[#1e332c] pb-6">
-          <p className="text-sm tracking-[0.2em] text-[#7db89a] uppercase">Level.Travel</p>
+          <p className="text-sm tracking-[0.2em] text-[#7db89a] uppercase">tbank.level.travel</p>
           <h1 className="mt-2 font-serif text-3xl sm:text-4xl text-[#f3f7f4]">
             Rixos Radamis Blue Planet
           </h1>
           <p className="mt-2 max-w-2xl text-[#9bb5a8]">
-            12 ночей в отеле · только прямые рейсы · Москва.
+            12 ночей в отеле · только прямые рейсы · Москва · ссылки на tbank.level.travel.
             <br />
-            Сначала ищем 3 самых дешёвых дня во всём диапазоне, затем в них — лучшие рейсы.
+            Сначала 3 самых дешёвых дня по итогу (цена − кэшбек 5%), затем в них — лучшие рейсы.
             <br />
             Вылет туда только до 09:00 · обратно только после 17:00.
             <br />
@@ -544,9 +521,11 @@ export default function Home() {
                         className="hover:text-[#cfe3d8]"
                         onClick={() => toggleSort(offerSort, "price", setOfferSort)}
                       >
-                        Цена{sortMark(offerSort, "price")}
+                        Итог{sortMark(offerSort, "price")}
                       </button>
                     </th>
+                    <th className="px-3 py-2">Цена</th>
+                    <th className="px-3 py-2">Кэшбек 5%</th>
                     <th className="px-3 py-2">
                       <button
                         type="button"
@@ -558,7 +537,6 @@ export default function Home() {
                     </th>
                     <th className="px-3 py-2">Туда</th>
                     <th className="px-3 py-2">Обратно</th>
-                    <th className="px-3 py-2">Vs мин. цена</th>
                     <th className="px-3 py-2">Оператор</th>
                     <th className="px-3 py-2">Ссылка</th>
                   </tr>
@@ -570,7 +548,13 @@ export default function Home() {
                       className="border-t border-[#1e332c]"
                     >
                       <td className="px-3 py-2 text-[#8aa597]">{i + 1}</td>
-                      <td className="px-3 py-2 whitespace-nowrap font-medium">{money(o.price)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap font-medium text-[#cfe3d8]">
+                        {money(netOf(o.price))}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">{money(o.price)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-[#7db89a]">
+                        −{money(cashbackOf(o.price))}
+                      </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         {fmtDateRu(o.checkIn || o.outboundDep)}
                       </td>
@@ -588,9 +572,6 @@ export default function Home() {
                           {o.lateBack ? " · после 17:00" : ""}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-xs text-[#9bb5a8] max-w-[220px]">
-                        {altNote(o, cheapestOffer)}
-                      </td>
                       <td className="px-3 py-2">{o.operator}</td>
                       <td className="px-3 py-2">
                         <a
@@ -599,7 +580,7 @@ export default function Home() {
                           rel="noreferrer"
                           className="text-[#6ecf9c] underline underline-offset-2"
                         >
-                          Level
+                          T-Bank
                         </a>
                       </td>
                     </tr>
@@ -622,9 +603,11 @@ export default function Home() {
                       className="hover:text-[#cfe3d8]"
                       onClick={() => toggleSort(pkgSort, "price", setPkgSort)}
                     >
-                      Цена{sortMark(pkgSort, "price")}
+                      Итог{sortMark(pkgSort, "price")}
                     </button>
                   </th>
+                  <th className="px-3 py-2">Цена</th>
+                  <th className="px-3 py-2">Кэшбек</th>
                   <th className="px-3 py-2">
                     <button
                       type="button"
@@ -641,12 +624,16 @@ export default function Home() {
               <tbody>
                 {sortedPackages.slice(0, 40).map((p) => (
                   <tr key={p.packageId} className="border-t border-[#1e332c]">
+                    <td className="px-3 py-2 whitespace-nowrap font-medium">{money(netOf(p.price))}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{money(p.price)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-[#7db89a]">
+                      −{money(cashbackOf(p.price))}
+                    </td>
                     <td className="px-3 py-2 whitespace-nowrap">{fmtDateRu(p.departDate)}</td>
                     <td className="px-3 py-2">{p.operator}</td>
                     <td className="px-3 py-2">
                       <a href={p.url} target="_blank" rel="noreferrer" className="text-[#6ecf9c]">
-                        Level
+                        T-Bank
                       </a>
                     </td>
                   </tr>
@@ -667,7 +654,7 @@ export default function Home() {
   );
 }
 
-/** Цена ↑, при равной — раньше туда / позже обратно; до 4 слотов на пакет. */
+/** По итогу (после кэшбека) ↑, при равной — раньше туда / позже обратно; до 4 слотов на пакет. */
 function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
   const seen = new Set<string>();
   const unique: FlightOffer[] = [];
@@ -675,7 +662,7 @@ function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
     .filter((r) => Number(r.hotelNights) === 12)
     .sort(
       (a, b) =>
-        a.price - b.price ||
+        netOf(a.price) - netOf(b.price) ||
         prefScore(b) - prefScore(a) ||
         a.outboundDep.localeCompare(b.outboundDep),
     );
@@ -691,6 +678,6 @@ function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
     perPkg.set(r.packageId, n + 1);
     unique.push(r);
   }
-  unique.sort((a, b) => a.price - b.price || prefScore(b) - prefScore(a));
+  unique.sort((a, b) => netOf(a.price) - netOf(b.price) || prefScore(b) - prefScore(a));
   return unique;
 }

@@ -5,6 +5,9 @@ import { createHash } from "crypto";
 export const LT_KEY = "0fe9fb2ff35679322db5429b18a53aee";
 export const LT_HOTEL_ID = 9162952;
 export const LT_API = "https://api.level.travel";
+export const LT_SITE = "https://tbank.level.travel";
+/** Кэшбек Т-Банка на tbank.level.travel (из tooltip партнёра). */
+export const CASHBACK_RATE = 0.05;
 export const ROOM_NEEDLE = "BLUE PLANET";
 export const PREFERRED_OPERATORS = new Set([2, 3, 7, 8, 70]);
 
@@ -88,8 +91,8 @@ export async function ltGet(path: string, params: Record<string, string>, apiVer
     headers: {
       "User-Agent": UA,
       Accept: "*/*",
-      Origin: "https://level.travel",
-      Referer: "https://level.travel/",
+      Origin: "https://tbank.level.travel",
+      Referer: "https://tbank.level.travel/",
       "X-Cnt": "ru",
       "X-Lang": "ru",
       "X-Cur": "RUB",
@@ -227,7 +230,7 @@ export async function packagesFromRequest(
       checkIn: pkg.dates_info?.check_in || "",
       checkOut: pkg.dates_info?.check_out || "",
       packageId: pkg.id,
-      url: `https://level.travel/packages/${pkg.id}`,
+      url: `https://tbank.level.travel/packages/${pkg.id}`,
     });
   }
   return packages;
