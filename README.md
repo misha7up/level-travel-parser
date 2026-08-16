@@ -2,6 +2,12 @@
 
 Next.js app: даты → пакеты Level → прямые рейсы (12 ночей в отеле) → топ выгодных.
 
+## Ubuntu (рекомендуется для рейсов)
+
+Полная инструкция: **[DEPLOY_UBUNTU.md](./DEPLOY_UBUNTU.md)**.
+
+Кратко: Node 22 + `chromium-browser` + `npm run build` + systemd + nginx → открываешь `http://IP/`. Browserless не нужен.
+
 ## Локально
 
 ```bash

@@ -1,3 +1,4 @@
+import { existsSync } from "fs";
 import type { Browser, Page } from "puppeteer-core";
 
 /** Runs in page context: only direct flights with hotel nights_count === 12. */
@@ -191,6 +192,30 @@ function browserWsEndpoint(): string | null {
   return null;
 }
 
+function resolveChromePath(): string {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const candidates =
+    process.platform === "win32"
+      ? [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        ]
+      : [
+          "/usr/bin/chromium-browser",
+          "/usr/bin/chromium",
+          "/usr/bin/google-chrome-stable",
+          "/usr/bin/google-chrome",
+          "/snap/bin/chromium",
+        ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  throw new Error(
+    "no_chrome: поставь Chromium (`sudo apt install -y chromium-browser`) или задай CHROME_PATH",
+  );
+}
+
 async function launchBrowser(): Promise<Browser> {
   const puppeteer = await import("puppeteer-core");
   const ws = browserWsEndpoint();
@@ -220,13 +245,18 @@ async function launchBrowser(): Promise<Browser> {
     );
   }
 
-  const chromePath =
-    process.env.CHROME_PATH ||
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+  const executablePath = resolveChromePath();
   return puppeteer.default.launch({
-    executablePath: chromePath,
+    executablePath,
     headless: true,
     defaultViewport: { width: 1440, height: 900 },
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--font-render-hinting=none",
+    ],
   });
 }
 
