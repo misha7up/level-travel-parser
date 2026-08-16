@@ -25,13 +25,35 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     }
     return store;
   }
+
+  /** Суммы «Кешбек + N» с карточек (не процент из tooltip). */
+  function scrapeCashbackByPrice() {
+    const map = {};
+    const nodes = document.querySelectorAll('div');
+    for (let i = 0; i < nodes.length; i++) {
+      const t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim();
+      if (t.length < 15 || t.length > 120) continue;
+      const cm = t.match(/Кешб[еэ]к\\s*\\+?\\s*([\\d\\s]+)/i);
+      const pm = t.match(/([\\d\\s]{4,})\\s*₽/);
+      if (!cm || !pm) continue;
+      const price = Number(pm[1].replace(/\\s+/g, ''));
+      const cash = Number(cm[1].replace(/\\s+/g, ''));
+      if (price > 10000 && cash > 0) map[price] = cash;
+    }
+    return map;
+  }
+
   const store = findStore();
   if (!store) return { ok: false, error: 'no_store' };
   const st = store.getState();
   const loading = st.flights && st.flights.loadingState;
+  try {
+    store.dispatch({ type: 'flights/setVisibleFlights', payload: 120 });
+  } catch (e) {}
   const all = [...(st.flights.economFlights || []), ...(st.flights.businessFlights || [])];
   const pkg = st.package || {};
   const pkgNights = Number((pkg.dates_info && pkg.dates_info.nights_count) || pkg.nights_count || 0);
+  const cashByPrice = scrapeCashbackByPrice();
   function back0(f) {
     const b = f.back;
     return Array.isArray(b) ? b[0] : b;
@@ -54,15 +76,14 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     const ret = new Date(b.departure);
     const outMin = out.getHours() * 60 + out.getMinutes();
     const retMin = ret.getHours() * 60 + ret.getMinutes();
-    // только: туда до 09:00, обратно после 17:00
     if (outMin >= 9 * 60) continue;
     if (retMin < 17 * 60) continue;
-    const early = outMin < 9 * 60;
-    const late = retMin >= 17 * 60;
-    // выше = лучше: раньше туда + позже обратно
     const preferenceScore = (24 * 60 - outMin) + retMin;
+    const price = f.total_package_price;
+    const cashback = cashByPrice[price] != null ? cashByPrice[price] : null;
     rows.push({
-      price: f.total_package_price,
+      price,
+      cashback,
       hotelNights: di.nights_count,
       checkIn: di.check_in,
       checkOut: di.check_out,
@@ -78,25 +99,18 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
       returnTo: (b.destination || {}).code,
       returnFlight: b.flight_no,
       returnAirline: (b.airline || {}).name,
-      earlyOut: early,
-      lateBack: late,
+      earlyOut: outMin < 9 * 60,
+      lateBack: retMin >= 17 * 60,
       outMinutes: outMin,
       retMinutes: retMin,
       preferenceScore,
     });
   }
-  rows.sort((a, b) => a.price - b.price || b.preferenceScore - a.preferenceScore);
-  function cashbackFromPage() {
-    const tip =
-      (window.customCashback && window.customCashback.cashbackTooltip) ||
-      (window.cashback && window.cashback.cashback && window.cashback.cashback.tooltip) ||
-      '';
-    const m = String(tip).match(/(\\d+(?:[.,]\\d+)?)\\s*%/);
-    if (!m) return null;
-    const n = Number(String(m[1]).replace(',', '.'));
-    if (!isFinite(n) || n <= 0 || n > 100) return null;
-    return { rate: n / 100, tooltip: tip };
-  }
+  rows.sort((a, b) => {
+    const na = a.price - (a.cashback || 0);
+    const nb = b.price - (b.cashback || 0);
+    return na - nb || b.preferenceScore - a.preferenceScore;
+  });
   return {
     ok: true,
     loading,
@@ -107,13 +121,15 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     room: pkg.room_type || null,
     meal: pkg.pansion_description || pkg.pansion || null,
     operator: (pkg.operator && pkg.operator.name) || null,
-    cashback: cashbackFromPage(),
+    cashbackMapped: Object.keys(cashByPrice).length,
     best: rows.slice(0, 24),
   };
 })()`;
 
 export type FlightOffer = {
   price: number;
+  /** Сумма кэшбека с карточки tbank (₽), не %. */
+  cashback: number | null;
   hotelNights: number;
   checkIn: string;
   checkOut: string;
@@ -158,6 +174,9 @@ function whyText(row: FlightOffer) {
   } else if (row.lateBack) {
     parts.push("возврат после 17:00");
   }
+  if (row.cashback != null && row.cashback > 0) {
+    parts.push(`кэшбек ${fmtMoney(row.cashback)}`);
+  }
   return parts.join("; ");
 }
 
@@ -181,8 +200,6 @@ async function launchBrowser(): Promise<Browser> {
 
   const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
   if (isServerless) {
-    // Локальный Chromium-pack на Hobby часто висит на скачивании 66MB.
-    // Без BROWSERLESS_TOKEN / BROWSER_WS_ENDPOINT — сразу явная ошибка.
     if (process.env.ALLOW_VERCEL_CHROMIUM === "1") {
       const chromiumMod = await import("@sparticuz/chromium");
       const chromium = chromiumMod.default ?? chromiumMod;
@@ -203,8 +220,11 @@ async function launchBrowser(): Promise<Browser> {
     );
   }
 
+  const chromePath =
+    process.env.CHROME_PATH ||
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
   return puppeteer.default.launch({
-    channel: "chrome",
+    executablePath: chromePath,
     headless: true,
     defaultViewport: { width: 1440, height: 900 },
   });
@@ -216,8 +236,15 @@ async function waitFlights(page: Page, timeoutMs = 12_000) {
   let last: any = { ok: false };
   while (Date.now() < deadline) {
     last = await page.evaluate(EXTRACT_FLIGHTS_JS);
-    if (last?.ok && last.loading === "fetchFinished") return last;
-    if (last?.ok && (last.direct12n || 0) > 0) return last;
+    if (last?.ok && last.loading === "fetchFinished") {
+      // дать React отрисовать больше карточек после setVisibleFlights
+      await sleep(700);
+      last = await page.evaluate(EXTRACT_FLIGHTS_JS);
+      return last;
+    }
+    if (last?.ok && (last.direct12n || 0) > 0 && (last.cashbackMapped || 0) > 0) {
+      return last;
+    }
     await sleep(700);
   }
   return last;
@@ -247,6 +274,7 @@ async function enrichPackageInner(
       .map((row: any) => {
         const fo: FlightOffer = {
           ...row,
+          cashback: typeof row.cashback === "number" ? row.cashback : null,
           hotelNights: 12,
           source: "tbank.level.travel",
           operator: last.operator || meta?.operator || "",
@@ -275,7 +303,7 @@ async function enrichPackageInner(
       packageId,
       totalFlights: last.totalFlights,
       direct12n: offers.length,
-      cashback: last.cashback || null,
+      cashbackMapped: last.cashbackMapped || 0,
       offers,
     };
   } finally {
