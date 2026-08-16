@@ -35,6 +35,8 @@ type FlightOffer = {
   returnAirline: string;
   earlyOut: boolean;
   lateBack: boolean;
+  outMinutes?: number;
+  retMinutes?: number;
   preferenceScore: number;
   operator: string;
   room: string;
@@ -98,11 +100,60 @@ function dateKey(isoOrDate: string) {
   return (isoOrDate || "").slice(0, 10);
 }
 
+function minutesOf(iso: string) {
+  try {
+    const d = new Date(iso);
+    return d.getHours() * 60 + d.getMinutes();
+  } catch {
+    return 12 * 60;
+  }
+}
+
+function outMin(o: FlightOffer) {
+  return o.outMinutes ?? minutesOf(o.outboundDep);
+}
+
+function retMin(o: FlightOffer) {
+  return o.retMinutes ?? minutesOf(o.returnDep);
+}
+
+function prefScore(o: FlightOffer) {
+  if (typeof o.preferenceScore === "number" && o.preferenceScore > 10) return o.preferenceScore;
+  return 24 * 60 - outMin(o) + retMin(o);
+}
+
+function fmtDeltaHours(mins: number) {
+  const h = Math.floor(Math.abs(mins) / 60);
+  const m = Math.abs(mins) % 60;
+  if (h && m) return `${h} ч ${m} мин`;
+  if (h) return `${h} ч`;
+  return `${m} мин`;
+}
+
+/** Сравнение с самым дешёвым: сколько доплатить за более ранний туда / поздний обратно. */
+function altNote(o: FlightOffer, cheapest: FlightOffer | null): string {
+  if (!cheapest || o.packageId === cheapest.packageId && o.outboundDep === cheapest.outboundDep && o.returnDep === cheapest.returnDep) {
+    return "мин. цена";
+  }
+  const delta = o.price - cheapest.price;
+  const earlier = outMin(cheapest) - outMin(o);
+  const laterBack = retMin(o) - retMin(cheapest);
+  const parts: string[] = [];
+  if (earlier > 0) parts.push(`вылет раньше на ${fmtDeltaHours(earlier)}`);
+  if (laterBack > 0) parts.push(`обратно позже на ${fmtDeltaHours(laterBack)}`);
+  if (!parts.length) {
+    if (delta <= 0) return "дешевле / тот же слот";
+    return delta > 0 ? `+${money(delta)} без выигрыша по времени` : "";
+  }
+  if (delta <= 0) return parts.join(" · ");
+  return `+${money(delta)} за ${parts.join(" и ")}`;
+}
+
 export default function Home() {
   const [dateFrom, setDateFrom] = useState("2026-09-18");
   const [dateTo, setDateTo] = useState("2026-09-28");
-  const [topN, setTopN] = useState(10);
-  const enrichTop = 5; // меньше пакетов — меньше шанс упереться в лимиты браузера
+  const [topN, setTopN] = useState(20);
+  const enrichTop = 12;
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [packages, setPackages] = useState<PackageRow[]>([]);
@@ -122,19 +173,22 @@ export default function Home() {
 
   const dates = useMemo(() => daysBetween(dateFrom, dateTo), [dateFrom, dateTo]);
 
+  const cheapestOffer = useMemo(() => {
+    if (!offers.length) return null;
+    return [...offers].sort((a, b) => a.price - b.price || prefScore(b) - prefScore(a))[0];
+  }, [offers]);
+
   const sortedOffers = useMemo(() => {
     const rows = [...offers];
     rows.sort((a, b) => {
-      // базовый приоритет: рано+поздно выше при равной цене / при ручной сортировке по цене
       if (offerSort.key === "date") {
         const da = dateKey(a.checkIn || a.outboundDep);
         const db = dateKey(b.checkIn || b.outboundDep);
-        const cmp = da.localeCompare(db) || a.price - b.price;
+        const cmp = da.localeCompare(db) || a.price - b.price || prefScore(b) - prefScore(a);
         return offerSort.dir === "asc" ? cmp : -cmp;
       }
-      const pref = (b.preferenceScore || 0) - (a.preferenceScore || 0);
-      const priceCmp = a.price - b.price;
-      const cmp = priceCmp || pref;
+      // цена, при равной — раньше туда / позже обратно
+      const cmp = a.price - b.price || prefScore(b) - prefScore(a);
       return offerSort.dir === "asc" ? cmp : -cmp;
     });
     return rows;
@@ -411,12 +465,12 @@ export default function Home() {
             <input
               type="number"
               min={5}
-              max={30}
+              max={40}
               value={topN}
-              onChange={(e) => setTopN(Number(e.target.value) || 10)}
+              onChange={(e) => setTopN(Number(e.target.value) || 20)}
               className="rounded-lg border border-[#2a453b] bg-[#0c1210] px-3 py-2"
             />
-            <span className="text-xs text-[#6a8578]">например 10 — топ‑10 в таблице</span>
+            <span className="text-xs text-[#6a8578]">по умолчанию 20</span>
           </label>
           <div className="sm:col-span-2 lg:col-span-3 flex flex-wrap items-center gap-3 pt-1">
             <button
@@ -427,11 +481,6 @@ export default function Home() {
             >
               {running ? "Собираю…" : "Обновить"}
             </button>
-            <span className="text-sm text-[#8aa597]">
-              {dates.length} дн. · фаза: {phase}
-              {packages.length ? ` · пакетов: ${packages.length}` : ""}
-              {offers.length ? ` · слотов: ${offers.length}` : ""}
-            </span>
           </div>
         </section>
 
@@ -470,6 +519,7 @@ export default function Home() {
                     </th>
                     <th className="px-3 py-2">Туда</th>
                     <th className="px-3 py-2">Обратно</th>
+                    <th className="px-3 py-2">Vs мин. цена</th>
                     <th className="px-3 py-2">Оператор</th>
                     <th className="px-3 py-2">Ссылка</th>
                   </tr>
@@ -498,6 +548,9 @@ export default function Home() {
                           {o.returnAirline} {o.returnFlight}
                           {o.lateBack ? " · поздно" : ""}
                         </span>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-[#9bb5a8] max-w-[220px]">
+                        {altNote(o, cheapestOffer)}
                       </td>
                       <td className="px-3 py-2">{o.operator}</td>
                       <td className="px-3 py-2">
@@ -575,7 +628,7 @@ export default function Home() {
   );
 }
 
-/** Цена ↑, при равной — выше score рано/поздно; до 2 слотов на пакет, сначала с лучшим score. */
+/** Цена ↑, при равной — раньше туда / позже обратно; до 4 слотов на пакет. */
 function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
   const seen = new Set<string>();
   const unique: FlightOffer[] = [];
@@ -584,7 +637,7 @@ function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
     .sort(
       (a, b) =>
         a.price - b.price ||
-        (b.preferenceScore || 0) - (a.preferenceScore || 0) ||
+        prefScore(b) - prefScore(a) ||
         a.outboundDep.localeCompare(b.outboundDep),
     );
   const perPkg = new Map<number, number>();
@@ -594,16 +647,11 @@ function dedupeRank(rows: FlightOffer[]): FlightOffer[] {
     );
     if (seen.has(key)) continue;
     const n = perPkg.get(r.packageId) || 0;
-    if (n >= 2) continue;
+    if (n >= 4) continue;
     seen.add(key);
     perPkg.set(r.packageId, n + 1);
     unique.push(r);
   }
-  // финальный порядок топа: сначала максимальный preference при близкой цене —
-  // внутри уже отсортировано по цене; дополнительно поднимем score=2 выше score=0 при той же цене
-  unique.sort(
-    (a, b) =>
-      a.price - b.price || (b.preferenceScore || 0) - (a.preferenceScore || 0),
-  );
+  unique.sort((a, b) => a.price - b.price || prefScore(b) - prefScore(a));
   return unique;
 }

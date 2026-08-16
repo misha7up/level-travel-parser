@@ -52,8 +52,12 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     if (!to || !b) continue;
     const out = new Date(to.departure);
     const ret = new Date(b.departure);
-    const early = out.getHours() * 60 + out.getMinutes() < 8 * 60;
-    const late = ret.getHours() * 60 + ret.getMinutes() >= 18 * 60;
+    const outMin = out.getHours() * 60 + out.getMinutes();
+    const retMin = ret.getHours() * 60 + ret.getMinutes();
+    const early = outMin < 8 * 60;
+    const late = retMin >= 18 * 60;
+    // выше = лучше: раньше туда + позже обратно
+    const preferenceScore = (24 * 60 - outMin) + retMin;
     rows.push({
       price: f.total_package_price,
       hotelNights: di.nights_count,
@@ -73,7 +77,9 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
       returnAirline: (b.airline || {}).name,
       earlyOut: early,
       lateBack: late,
-      preferenceScore: (early ? 1 : 0) + (late ? 1 : 0),
+      outMinutes: outMin,
+      retMinutes: retMin,
+      preferenceScore,
     });
   }
   rows.sort((a, b) => a.price - b.price || b.preferenceScore - a.preferenceScore);
@@ -87,7 +93,7 @@ export const EXTRACT_FLIGHTS_JS = `(() => {
     room: pkg.room_type || null,
     meal: pkg.pansion_description || pkg.pansion || null,
     operator: (pkg.operator && pkg.operator.name) || null,
-    best: rows.slice(0, 12),
+    best: rows.slice(0, 24),
   };
 })()`;
 
@@ -110,6 +116,8 @@ export type FlightOffer = {
   returnAirline: string;
   earlyOut: boolean;
   lateBack: boolean;
+  outMinutes?: number;
+  retMinutes?: number;
   preferenceScore: number;
   source: string;
   operator: string;
