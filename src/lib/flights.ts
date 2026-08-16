@@ -202,11 +202,10 @@ function resolveChromePath(): string {
           "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
         ]
       : [
-          // Ubuntu: /usr/bin/chromium-browser часто заглушка «install snap» — сначала snap/реальный бинарь
-          "/snap/bin/chromium",
-          "/usr/bin/chromium",
           "/usr/bin/google-chrome-stable",
           "/usr/bin/google-chrome",
+          "/snap/bin/chromium",
+          "/usr/bin/chromium",
           "/usr/bin/chromium-browser",
         ];
   for (const p of candidates) {
